@@ -1,5 +1,6 @@
 import i18n from "@/i18n";
 import { isRemoteArxivPath, notesPathForPaper } from "@/lib/paper";
+import { isPaperChildDocPath } from "@/lib/paper/children";
 import {
 	createPlaceholderTab,
 	findCanonicalTab,
@@ -15,6 +16,14 @@ import { viewerModeSpec } from "@/lib/workspace/viewer";
 
 export function tabNotesEligible(tab: DocTab | null): boolean {
 	if (!tab) return false;
+	if (
+		tab.kind === "file" &&
+		tab.mode === "html" &&
+		tab.notesPath &&
+		isPaperChildDocPath(tab.path, tab.notesPath.replace(/[\\/]notes\.md$/i, ""))
+	) {
+		return false;
+	}
 	return (
 		tab.kind !== "library" &&
 		!isRemoteArxivPath(tab.path) &&
@@ -44,21 +53,22 @@ export function tabIsPaperNotes(tab: DocTab | null): boolean {
 
 /**
  * Markdown tab that represents a paper note: canonical `NOTES.md` (or the paper
- * root markdown tab) plus any extra note opened from inside the paper folder.
+ * root markdown tab) plus root-level Markdown/HTML paper documents.
  * Broader than {@link tabIsPaperNotes} so a replaced notes column keeps being
  * recognized after showing an extra note.
  */
 export function tabIsPaperNoteDocument(tab: DocTab | null): boolean {
-	if (tab?.mode !== "markdown" || !tab.notesPath || tab.kind === "paper") {
+	if (
+		!tab ||
+		(tab.mode !== "markdown" && tab.mode !== "html") ||
+		!tab.notesPath ||
+		tab.kind === "paper"
+	) {
 		return false;
 	}
 	const paperDir = normalizeTabPath(tab.notesPath).replace(/\/notes\.md$/, "");
 	const tabPath = normalizeTabPath(tab.path);
-	return (
-		tabPath === normalizeTabPath(tab.notesPath) ||
-		tabPath === paperDir ||
-		tabPath.startsWith(`${paperDir}/`)
-	);
+	return tabPath === paperDir || isPaperChildDocPath(tabPath, paperDir);
 }
 
 /**
@@ -85,7 +95,7 @@ export function findNotesColumnAnchor(
 	opts?: { excludeId?: string; preferId?: string | null },
 ): DocTab | null {
 	const candidates = tabs.filter(
-		(t) => t.id !== opts?.excludeId && tabIsPaperNotes(t),
+		(t) => t.id !== opts?.excludeId && tabIsPaperNoteDocument(t),
 	);
 	if (!candidates.length) return null;
 	if (opts?.preferId) {
@@ -173,8 +183,7 @@ export function tabHasNotesSplit(
 	tabs: DocTab[],
 	paperTab: DocTab | null,
 ): boolean {
-	if (!paperTab?.notesPath) return false;
-	return findCanonicalTab(tabs, paperTab.notesPath) != null;
+	return findReadingCompanion(tabs, paperTab) != null;
 }
 
 /**
@@ -184,10 +193,31 @@ export function tabHasNotesSplit(
 export function findReadingCompanion(
 	tabs: DocTab[],
 	tab: DocTab | null,
+	preferredPath?: string | null,
 ): DocTab | null {
 	if (!tab || !isPaperContentTab(tab) || !tab.notesPath) return null;
 	if (!isCanonicalView(tab)) return null;
-	return findCanonicalTab(tabs, tab.notesPath) ?? null;
+	const notesKey = normalizeTabPath(tab.notesPath);
+	const selected = preferredPath ? findCanonicalTab(tabs, preferredPath) : null;
+	if (
+		selected &&
+		tabIsPaperNoteDocument(selected) &&
+		selected.notesPath &&
+		normalizeTabPath(selected.notesPath) === notesKey
+	) {
+		return selected;
+	}
+	return (
+		findCanonicalTab(tabs, tab.notesPath) ??
+		tabs.find(
+			(candidate) =>
+				isCanonicalView(candidate) &&
+				tabIsPaperNoteDocument(candidate) &&
+				candidate.notesPath != null &&
+				normalizeTabPath(candidate.notesPath) === notesKey,
+		) ??
+		null
+	);
 }
 
 /**
@@ -218,9 +248,13 @@ export function findPaperBodyForNotes(
  * Panel ids to close together: closing a paper body (PDF/HTML) also closes
  * its open NOTES panel, but closing NOTES leaves the body open.
  */
-export function readingPairCloseIds(tabs: DocTab[], id: string): string[] {
+export function readingPairCloseIds(
+	tabs: DocTab[],
+	id: string,
+	preferredPath?: string | null,
+): string[] {
 	const tab = tabs.find((t) => t.id === id) ?? null;
-	const companion = findReadingCompanion(tabs, tab);
+	const companion = findReadingCompanion(tabs, tab, preferredPath);
 	if (!companion || companion.id === id) return [id];
 	// Companion first so body/NOTES order is stable for tests and revoke order.
 	return [companion.id, id];

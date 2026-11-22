@@ -25,6 +25,7 @@ export {
 	createNotesSplitPane,
 	findNotesPaneForReplacement,
 	findPaperBodyForNotes,
+	findReadingCompanion,
 	isPaperContentTab,
 	paperReadingPlacements,
 	readingPairCloseIds,

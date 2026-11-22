@@ -87,6 +87,10 @@
 		"markdownPlaceholder": "在此输入 Markdown……",
 		"notesPlaceholder": "在此撰写这篇论文的笔记……"
 	},
+	"paperNotes": {
+		"document": "论文笔记文档",
+		"missing": "“{{name}}” 已不存在，已保留当前笔记。"
+	},
 	"diskConflict": {
 		"title": "“{{name}}” 已被外部修改（已保留你的未存改动）",
 		"reload": "载入磁盘版",

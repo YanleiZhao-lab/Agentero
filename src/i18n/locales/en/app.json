@@ -87,6 +87,10 @@
 		"markdownPlaceholder": "Type Markdown here...",
 		"notesPlaceholder": "Write notes for this paper..."
 	},
+	"paperNotes": {
+		"document": "Paper note document",
+		"missing": "“{{name}}” is no longer available. The current note was kept."
+	},
 	"diskConflict": {
 		"title": "“{{name}}” changed on disk — kept your unsaved edits",
 		"reload": "Load disk version",

@@ -66,6 +66,12 @@ import {
 } from "@/lib/workspace/dock-registry";
 import { vaultLoadGeneration } from "@/lib/workspace/identity";
 import {
+	isPaperRootNoteDocument,
+	preferredPaperNoteDocument,
+	rememberPaperNoteDocument,
+	storedPaperNoteDocument,
+} from "@/lib/workspace/paper-note-selection";
+import {
 	getActiveTabId,
 	getTabs,
 	pushClosedTabs,
@@ -87,6 +93,8 @@ import {
 	ensureFullLibraryTab,
 	findCanonicalTab,
 	findNotesPaneForReplacement,
+	findPaperBodyForNotes,
+	findReadingCompanion,
 	insertPlaceholderTab,
 	isCanonicalView,
 	isPaperContentTab,
@@ -105,7 +113,6 @@ import {
 	splitPaneIdForPath,
 	tabHasNotesSplit,
 	tabIsPaperNoteDocument,
-	tabIsPaperNotes,
 	tabNotesEligible,
 	tabTitleForPath,
 } from "./tabs";
@@ -158,6 +165,13 @@ function detachClosedPanels(
  */
 let readingSync = false;
 
+function selectedNotePath(tab: DocTab | null | undefined): string | null {
+	const vault = getVaultPath();
+	return vault && tab?.notesPath
+		? storedPaperNoteDocument(vault, tab.notesPath)
+		: null;
+}
+
 /**
  * Anchors of the standard two-column reading layout, or null when the dock is
  * not showing exactly two side-by-side columns.
@@ -171,9 +185,9 @@ function readingColumns(): ReadingColumns | null {
  * activate that tab in the notes column too (focus ends on the paper).
  */
 export function activatePaperWithNotes(paperTab: DocTab): void {
-	const notesId = paperTab.notesPath
-		? (findCanonicalTab(getTabs(), paperTab.notesPath)?.id ?? null)
-		: null;
+	const notesId =
+		findReadingCompanion(getTabs(), paperTab, selectedNotePath(paperTab))?.id ??
+		null;
 	const notesOpen = notesId != null;
 	readingSync = true;
 	try {
@@ -255,7 +269,8 @@ export function handleActivePanelChange(panelId: string | null): void {
 	notePaperFocus(readingPathForTab(tab));
 
 	if (isPaperContentTab(tab) && tab.notesPath) {
-		const notesId = findCanonicalTab(getTabs(), tab.notesPath)?.id ?? null;
+		const notesId =
+			findReadingCompanion(getTabs(), tab, selectedNotePath(tab))?.id ?? null;
 		if (!notesId) return;
 		readingSync = true;
 		try {
@@ -277,15 +292,12 @@ export function handleActivePanelChange(panelId: string | null): void {
 		return;
 	}
 
-	if (tabIsPaperNotes(tab) && isCanonicalView(tab)) {
-		const notesKey = normalizeTabPath(tab.path);
-		const companion = getTabs().find(
-			(t) =>
-				isPaperContentTab(t) &&
-				isCanonicalView(t) &&
-				t.notesPath &&
-				normalizeTabPath(t.notesPath) === notesKey,
-		);
+	if (tabIsPaperNoteDocument(tab) && isCanonicalView(tab)) {
+		const vault = getVaultPath();
+		if (vault && tab.notesPath) {
+			rememberPaperNoteDocument(vault, tab.notesPath, tab.path);
+		}
+		const companion = findPaperBodyForNotes(getTabs(), tab);
 		if (companion) {
 			dockHandle()?.activatePanel(companion.id, {
 				skipSetGroupActive: true,
@@ -320,7 +332,39 @@ export function openTab(
 	},
 ): void {
 	const existing = findCanonicalTab(getTabs(), path);
+	const replaceId = opts?.replaceNotesPaneId ?? null;
+	const candidate =
+		replaceId != null
+			? (getTabs().find((t) => t.id === replaceId) ?? null)
+			: null;
+	// Only replace a panel this dock can actually see.
+	const replaced =
+		candidate && dockHandle()?.canActivatePanel(candidate.id) === true
+			? candidate
+			: null;
+	const editor =
+		replaced && replaced.id !== existing?.id
+			? markdownEditorFor(replaced.id)
+			: null;
+	if (editor?.hasPendingSource()) {
+		void editor
+			.flushSource()
+			.then((saved) => {
+				if (saved && getTabs().some((tab) => tab.id === replaced?.id)) {
+					openTab(path, opts);
+				}
+			})
+			.catch((error) => notifyError(errorText(error)));
+		return;
+	}
 	if (existing) {
+		if (replaced && replaced.id !== existing.id) {
+			closeTab(replaced.id, { remember: false });
+		}
+		const vault = getVaultPath();
+		if (vault && existing.kind === "file" && existing.notesPath) {
+			rememberPaperNoteDocument(vault, existing.notesPath, path);
+		}
 		const id = existing.id;
 		// Sync paper + NOTES tabs when re-opening an already-mounted paper.
 		if (
@@ -332,9 +376,15 @@ export function openTab(
 				!opts?.placement &&
 				Boolean(existing.notesPath) &&
 				(opts?.forceNotes || loadSettings().autoOpenPaperNotes);
-			if (wantDefaultNotes && !tabHasNotesSplit(getTabs(), existing)) {
+			const selectedPath = selectedNotePath(existing);
+			const companion = findReadingCompanion(getTabs(), existing, selectedPath);
+			const needsSelectedNotes =
+				!companion ||
+				(selectedPath &&
+					normalizeTabPath(companion.path) !== normalizeTabPath(selectedPath));
+			if (wantDefaultNotes && needsSelectedNotes) {
 				if (uiStore.getState().layoutMode !== "reading") {
-					openTabNotes(existing.id);
+					openNotesForPaper(existing.id);
 				}
 			}
 			activatePaperWithNotes(existing);
@@ -344,18 +394,6 @@ export function openTab(
 		}
 		return;
 	}
-
-	const replaceId = opts?.replaceNotesPaneId ?? null;
-	const candidate =
-		replaceId != null
-			? (getTabs().find((t) => t.id === replaceId) ?? null)
-			: null;
-	// Only replace a panel this dock can actually see; unreachable restored
-	// panes fall back to a normal open.
-	const replaced =
-		candidate && dockHandle()?.canActivatePanel(candidate.id) === true
-			? candidate
-			: null;
 
 	const beforeTabs = replaced
 		? getTabs().filter((t) => t.id !== replaced.id)
@@ -412,6 +450,9 @@ export function openTab(
 		// existing tab returned early above and is never patched here.
 		const patch = patchFromTabResources(res, placeholder);
 		updateTab(insertedId, patch);
+		if (vaultState.vaultPath && res.kind === "file" && res.notesPath) {
+			rememberPaperNoteDocument(vaultState.vaultPath, res.notesPath, path);
+		}
 
 		// Paper default: NOTES in the notes column (or first-time right split).
 		const wantDefaultNotes =
@@ -463,13 +504,50 @@ function openNotesForPaper(
 	paperId: string,
 	paperPatch?: Partial<DocTab>,
 	paperPath?: string,
+	focusNotes = false,
+): void {
+	const tab = getTabs().find((t) => t.id === paperId);
+	const notesPath = paperPatch?.notesPath ?? tab?.notesPath ?? null;
+	if (!tab && !paperPath) return;
+	const vault = getVaultPath();
+	const preferredPath =
+		vault && notesPath ? storedPaperNoteDocument(vault, notesPath) : notesPath;
+	if (vault && notesPath && preferredPath !== notesPath) {
+		const generation = vaultLoadGeneration();
+		void preferredPaperNoteDocument(vault, notesPath)
+			.then((selected) => {
+				if (
+					generation === vaultLoadGeneration() &&
+					getTabs().some((candidate) => candidate.id === paperId)
+				) {
+					placeNotesForPaper(
+						paperId,
+						paperPatch,
+						paperPath,
+						focusNotes,
+						selected,
+					);
+				}
+			})
+			.catch((error) => notifyError(errorText(error)));
+		return;
+	}
+	placeNotesForPaper(paperId, paperPatch, paperPath, focusNotes, notesPath);
+}
+
+function placeNotesForPaper(
+	paperId: string,
+	paperPatch: Partial<DocTab> | undefined,
+	paperPath: string | undefined,
+	focusNotes: boolean,
+	preferredPath: string | null,
 ): void {
 	const tab = getTabs().find((t) => t.id === paperId);
 	const notesPath = paperPatch?.notesPath ?? tab?.notesPath ?? null;
 	if (!tab && !paperPath) return;
 	const path = paperPath ?? tab?.path ?? "";
-	const notesTab = notesPath
-		? (findCanonicalTab(getTabs(), notesPath) ?? null)
+	const notesTab = preferredPath
+		? findCanonicalTab(getTabs(), preferredPath)
 		: null;
 	const notesId = notesTab?.id ?? null;
 	const notesInDock = notesId
@@ -477,7 +555,7 @@ function openNotesForPaper(
 		: false;
 	if (notesTab && notesInDock && notesId) {
 		dockHandle()?.activatePanel(notesId, { skipSetGroupActive: true });
-		dockHandle()?.activatePanel(paperId);
+		dockHandle()?.activatePanel(focusNotes ? notesId : paperId);
 		if (
 			uiStore.getState().layoutMode === "reading" &&
 			!dockHandle()?.isMaximizedPanel?.()
@@ -490,6 +568,25 @@ function openNotesForPaper(
 		// Drop the unreachable panel from state so the reopen below can
 		// register a fresh one under the same id.
 		setTabs((prev) => prev.filter((t) => t.id !== notesId));
+	}
+	const companion = tab ? findReadingCompanion(getTabs(), tab) : null;
+	if (preferredPath && (preferredPath !== notesPath || companion != null)) {
+		const { notes: placement } = paperReadingPlacements(getTabs(), {
+			paperId,
+			activeId: getActiveTabId(),
+			columns: readingColumns(),
+		});
+		openTab(preferredPath, {
+			placement,
+			replaceNotesPaneId: companion?.id,
+			skipDefaultNotes: true,
+		});
+		const openedNotes = findCanonicalTab(getTabs(), preferredPath);
+		if (placement?.direction === "right" && openedNotes) {
+			dockHandle()?.restoreNotesSplitWidth(paperId, openedNotes.id);
+		}
+		if (!focusNotes) dockHandle()?.activatePanel(paperId);
+		return;
 	}
 	const paperLike = {
 		...createPlaceholderTab(path, tab?.mode ?? "pdf", tab?.id ?? paperId),
@@ -512,8 +609,11 @@ function openNotesForPaper(
 		return [...prev, notesPane];
 	});
 	dockHandle()?.openPanel(notesPane, notesPlacement);
+	if (notesPlacement?.direction === "right") {
+		dockHandle()?.restoreNotesSplitWidth(paperId, notesPane.id);
+	}
 	// Keep focus on the paper body after NOTES joins the right column.
-	dockHandle()?.activatePanel(paperId);
+	dockHandle()?.activatePanel(focusNotes ? notesPane.id : paperId);
 	if (
 		uiStore.getState().layoutMode === "reading" &&
 		!dockHandle()?.isMaximizedPanel?.()
@@ -532,7 +632,11 @@ export function closeTab(id: string, opts: { remember?: boolean } = {}): void {
 	const target = getTabs().find((t) => t.id === id);
 	if (target && isLibraryVirtualPath(target.path)) return;
 	// Resolve pair before setState so Strict Mode double-invoke is stable.
-	const idsToClose = readingPairCloseIds(getTabs(), id);
+	const idsToClose = readingPairCloseIds(
+		getTabs(),
+		id,
+		selectedNotePath(target),
+	);
 	const pending = idsToClose
 		.map(markdownEditorFor)
 		.filter((handle) => handle?.hasPendingSource());
@@ -584,7 +688,9 @@ function rememberClosedTabs(idsToClose: readonly string[]): void {
 		.filter((tab): tab is DocTab => Boolean(tab));
 	const companionIds = new Set(
 		closing.flatMap((tab) =>
-			readingPairCloseIds(tabs, tab.id).filter((closeId) => closeId !== tab.id),
+			readingPairCloseIds(tabs, tab.id, selectedNotePath(tab)).filter(
+				(closeId) => closeId !== tab.id,
+			),
 		),
 	);
 	pushClosedTabs(
@@ -773,13 +879,7 @@ function activeNotesTarget(): DocTab | null {
 	const paper =
 		tab && tabNotesEligible(tab)
 			? tab
-			: getTabs().find(
-					(t) =>
-						tabNotesEligible(t) &&
-						t.notesPath &&
-						tab?.path &&
-						normalizeTabPath(t.notesPath) === normalizeTabPath(tab.path),
-				);
+			: findPaperBodyForNotes(getTabs(), tab ?? null);
 	return paper ?? tab ?? null;
 }
 
@@ -791,7 +891,9 @@ export function setNotesSplit(
 	if (!opts.preserveLayoutMode) setLayoutMode("custom");
 	const target = activeNotesTarget();
 	if (!target?.notesPath) return;
-	const notesId = findCanonicalTab(getTabs(), target.notesPath)?.id ?? null;
+	const notesId =
+		findReadingCompanion(getTabs(), target, selectedNotePath(target))?.id ??
+		null;
 	const isOpen = tabHasNotesSplit(getTabs(), target);
 	if (isOpen === open) return;
 	if (!open) {
@@ -804,24 +906,7 @@ export function setNotesSplit(
 		dockHandle()?.exitMaximizedPanel?.();
 	}
 	if (!tabNotesEligible(target) && target.kind !== "paper") return;
-	const notesPane = createNotesSplitPane(target);
-	if (!notesPane) return;
-	// Stack into the notes column when one exists; else first right split.
-	const { notes: notesPlacement } = paperReadingPlacements(getTabs(), {
-		paperId: target.id,
-		notesId: notesPane.id,
-		activeId: getActiveTabId(),
-		columns: readingColumns(),
-	});
-	setTabs((prev) => {
-		if (prev.some((t) => t.id === notesPane.id)) return prev;
-		return [...prev, notesPane];
-	});
-	cacheActiveTabBeforeDock(notesPane.id);
-	dockHandle()?.openPanel(notesPane, notesPlacement);
-	if (notesPlacement?.direction === "right") {
-		dockHandle()?.restoreNotesSplitWidth(target.id, notesPane.id);
-	}
+	openNotesForPaper(target.id, undefined, undefined, true);
 }
 
 /** Toggle NOTES.md panel for the active paper (⌘\ / Layout menu). */
@@ -835,30 +920,21 @@ export function toggleNotesSplit(): void {
 export function openTabNotes(tabId: string): void {
 	const target = getTabs().find((t) => t.id === tabId);
 	if (!target?.notesPath || !tabNotesEligible(target)) return;
-	const notesId = findCanonicalTab(getTabs(), target.notesPath)?.id ?? null;
+	const notesId =
+		findReadingCompanion(getTabs(), target, selectedNotePath(target))?.id ??
+		null;
 	if (dockHandle()?.isMaximizedPanel?.()) {
 		dockHandle()?.exitMaximizedPanel?.();
 	}
-	if (notesId && tabHasNotesSplit(getTabs(), target)) {
+	const selectedPath = selectedNotePath(target);
+	const selectedOpen =
+		selectedPath && findCanonicalTab(getTabs(), selectedPath)?.id === notesId;
+	if (notesId && selectedOpen && tabHasNotesSplit(getTabs(), target)) {
 		cacheActiveTabBeforeDock(notesId);
 		dockHandle()?.activatePanel(notesId);
 		return;
 	}
-	const notesPane = createNotesSplitPane(target);
-	if (!notesPane) return;
-	// Stack into the notes column when one exists; else first right split.
-	const { notes: notesPlacement } = paperReadingPlacements(getTabs(), {
-		paperId: target.id,
-		notesId: notesPane.id,
-		activeId: getActiveTabId(),
-		columns: readingColumns(),
-	});
-	setTabs((prev) => {
-		if (prev.some((t) => t.id === notesPane.id)) return prev;
-		return [...prev, notesPane];
-	});
-	cacheActiveTabBeforeDock(notesPane.id);
-	dockHandle()?.openPanel(notesPane, notesPlacement);
+	openNotesForPaper(target.id, undefined, undefined, true);
 }
 
 /** File-tree "Open notes": reading layout with NOTES in the right column. */
@@ -907,12 +983,18 @@ export function openRemoteArxivPaper(item: RemotePaperItem): void {
 /** Open any path with the mode inferred from its extension. */
 export function openPath(absoluteOrDemoPath: string): void {
 	const preferMode = preferredModeForPath(absoluteOrDemoPath);
+	const paperDir = paperDirFromPath(
+		absoluteOrDemoPath,
+		vaultStore.getState().paperFolders,
+	);
+	const isPaperNote =
+		paperDir &&
+		isPaperRootNoteDocument(absoluteOrDemoPath, notesPathForPaper(paperDir));
 	// Reading layout: a note clicked while a notes pane is open replaces that
 	// pane instead of stacking another note tab in the same column.
-	const replaceNotes =
-		preferMode === "markdown" && isUnderPapers(absoluteOrDemoPath)
-			? findNotesPaneForReplacement(getTabs(), getActiveTabId())
-			: null;
+	const replaceNotes = isPaperNote
+		? findNotesPaneForReplacement(getTabs(), getActiveTabId())
+		: null;
 	openTab(absoluteOrDemoPath, {
 		preferMode,
 		replaceNotesPaneId: replaceNotes?.id,

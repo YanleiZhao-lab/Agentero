@@ -7,6 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import type { PdfViewerHandle } from "@/components/viewer";
 import { HtmlViewer, ImageViewer } from "@/components/viewer";
 import { LocalHtmlViewer } from "@/components/viewer/local-html-viewer";
+import { PaperNoteSelector } from "@/components/workspace/paper-note-selector";
 import { RecycleBinView } from "@/components/workspace/recycle-bin-view";
 import { TexProjectView } from "@/components/writing/tex-project-view";
 import { useSharedWritingEditor } from "@/components/writing/writing-cloud-context";
@@ -25,6 +26,7 @@ import {
 	openWritingFile,
 	rememberWritingSource,
 } from "@/lib/workspace/navigation";
+import { isPaperRootNoteDocument } from "@/lib/workspace/paper-note-selection";
 import { updateTab } from "@/lib/workspace/store";
 import { type DocTab, tabIsPaperNotes } from "@/lib/workspace/tabs";
 import {
@@ -675,6 +677,26 @@ export function DocView(props: DocViewProps) {
 			>
 				{content}
 			</TexProjectView>
+		);
+	}
+	if (
+		vaultPath &&
+		!tab.writingRoot &&
+		tab.kind === "file" &&
+		tab.notesPath &&
+		(tab.mode === "markdown" || isHtmlPath(tab.path)) &&
+		isPaperRootNoteDocument(tab.path, tab.notesPath)
+	) {
+		return (
+			<div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+				<PaperNoteSelector
+					vaultPath={vaultPath}
+					notesPath={tab.notesPath}
+					path={tab.path}
+					active={active}
+				/>
+				{content}
+			</div>
 		);
 	}
 	return content;
