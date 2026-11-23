@@ -108,7 +108,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm adapters:stage
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --release --locked -p agentero features::agent::install::download::tests::builds_release_urls
+          $contract = "features::cli_install::download::tests::builds_release_urls"
+          $registeredTests = @(cargo test --release --locked -p agentero --lib -- --list)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($registeredTests -notcontains "${contract}: test") {
+            throw "Required CLI download contract test is not registered: $contract"
+          }
+          cargo test --release --locked -p agentero --lib $contract -- --exact
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked -p agentero-cli
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
