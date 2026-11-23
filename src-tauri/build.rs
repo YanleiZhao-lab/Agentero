@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=AGENTERO_RELEASE_REPO");
     // Unit-test binaries link the full Tauri stack, which statically imports
     // `TaskDialogIndirect` — exported only by comctl32 v6. tauri-build's
     // manifest resource reaches bin targets only (`rustc-link-arg-bins`), so
