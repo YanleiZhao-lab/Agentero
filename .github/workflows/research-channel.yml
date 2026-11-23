@@ -1,0 +1,170 @@
+name: Research channel
+
+on:
+  schedule:
+    - cron: "23 1,13 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when the stable upstream and customized source are unchanged
+        type: boolean
+        default: false
+
+concurrency:
+  group: research-channel
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.repository == 'YanleiZhao-lab/Agentero'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      build: ${{ steps.candidate.outputs.build }}
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
+      version: ${{ steps.candidate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: research/stable
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Integrate the latest stable upstream release
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESEARCH_STATE: ${{ runner.temp }}/research-state/state.json
+          RESEARCH_FORCE: ${{ inputs.force }}
+        run: node scripts/research-channel.mjs prepare
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: research-state
+          path: ${{ runner.temp }}/research-state
+          if-no-files-found: ignore
+          retention-days: 30
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      RESEARCH_STATE: ${{ github.workspace }}/research-state/state.json
+      RESEARCH_DELIVERY: ${{ runner.temp }}/research-delivery
+      RESEARCH_TAURI_CONFIG: ${{ runner.temp }}/research-tauri.json
+      RESEARCH_TAURI_PUBLIC_KEY: ${{ vars.RESEARCH_TAURI_PUBLIC_KEY }}
+      AGENTERO_RELEASE_REPO: YanleiZhao-lab/Agentero
+      VITE_AGENTERO_RELEASE_REPO: YanleiZhao-lab/Agentero
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: research-state
+          path: research-state
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: research-windows
+      - run: pnpm install --frozen-lockfile
+      - name: Check types, dependency boundaries and frontend behavior
+        run: |
+          pnpm typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm deps:check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Configure the Fork updater
+        id: config
+        run: node scripts/research-channel.mjs configure
+      - name: Prepare resources and verify the CLI download contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pnpm dictionary:stage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm pdfium:stage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm adapters:stage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked -p agentero features::agent::install::download::tests::builds_release_urls
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked -p agentero-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the signed Windows NSIS installer
+        id: tauri
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VITE_AGENTERO_ACCOUNT_SURFACE: "0"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.RESEARCH_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.RESEARCH_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          args: --config "${{ steps.config.outputs.config_path }}" --bundles nsis -- --locked
+          uploadUpdaterJson: false
+          retryAttempts: 0
+      - name: Package the installer and channel metadata
+        env:
+          TAURI_ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          TAURI_APP_VERSION: ${{ steps.tauri.outputs.appVersion }}
+        run: node scripts/research-channel.mjs package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: research-delivery
+          path: ${{ runner.temp }}/research-delivery
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RESEARCH_STATE: ${{ github.workspace }}/research-state/state.json
+      RESEARCH_DELIVERY: ${{ runner.temp }}/research-delivery
+      RESEARCH_TAURI_PUBLIC_KEY: ${{ vars.RESEARCH_TAURI_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: research-state
+          path: research-state
+      - uses: actions/download-artifact@v4
+        with:
+          name: research-delivery
+          path: ${{ runner.temp }}/research-delivery
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install the updater signature verifier
+        run: sudo apt-get update && sudo apt-get install -y minisign unzip
+      - name: Verify, stage, promote and publish
+        run: node scripts/research-channel.mjs publish
