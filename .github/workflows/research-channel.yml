@@ -58,8 +58,8 @@ jobs:
     timeout-minutes: 180
     env:
       RESEARCH_STATE: ${{ github.workspace }}/research-state/state.json
-      RESEARCH_DELIVERY: ${{ runner.temp }}/research-delivery
-      RESEARCH_TAURI_CONFIG: ${{ runner.temp }}/research-tauri.json
+      RESEARCH_DELIVERY: ${{ github.workspace }}/research-delivery
+      RESEARCH_TAURI_CONFIG: ${{ github.workspace }}/research-tauri.json
       RESEARCH_TAURI_PUBLIC_KEY: ${{ vars.RESEARCH_TAURI_PUBLIC_KEY }}
       AGENTERO_RELEASE_REPO: YanleiZhao-lab/Agentero
       VITE_AGENTERO_RELEASE_REPO: YanleiZhao-lab/Agentero
@@ -132,7 +132,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: research-delivery
-          path: ${{ runner.temp }}/research-delivery
+          path: ${{ env.RESEARCH_DELIVERY }}
           if-no-files-found: error
           retention-days: 30
 
@@ -145,7 +145,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RESEARCH_STATE: ${{ github.workspace }}/research-state/state.json
-      RESEARCH_DELIVERY: ${{ runner.temp }}/research-delivery
+      RESEARCH_DELIVERY: ${{ github.workspace }}/research-delivery
       RESEARCH_TAURI_PUBLIC_KEY: ${{ vars.RESEARCH_TAURI_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v5
@@ -159,7 +159,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: research-delivery
-          path: ${{ runner.temp }}/research-delivery
+          path: ${{ env.RESEARCH_DELIVERY }}
       - uses: actions/setup-node@v5
         with:
           node-version: 24
