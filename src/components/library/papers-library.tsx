@@ -9,7 +9,14 @@
  * Reading heat: title text background as a left→right spine (doc start→end).
  */
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { RefreshCw } from "lucide-react";
+import {
+	Check,
+	FileUp,
+	FolderPlus,
+	ListFilter,
+	RefreshCw,
+	Upload,
+} from "lucide-react";
 import type { MouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -18,9 +25,18 @@ import { useLibraryHeatmap } from "@/components/library/hooks/use-library-heatma
 import { useLibraryMarquee } from "@/components/library/hooks/use-library-marquee";
 import { useLibraryPreview } from "@/components/library/hooks/use-library-preview";
 import { useLibrarySelection } from "@/components/library/hooks/use-library-selection";
+import { LibraryCardView } from "@/components/library/library-card-view";
 import { resolveColumnWidths } from "@/components/library/library-column-widths";
 import { getColumnMeta } from "@/components/library/library-columns";
 import { LibraryCopyDialog } from "@/components/library/library-copy-dialog";
+import {
+	type LibraryFolderDraft,
+	LibraryFolderNameDialog,
+} from "@/components/library/library-folder-name-dialog";
+import {
+	libraryChildFolders,
+	paperIsInLibraryFolder,
+} from "@/components/library/library-folders";
 import { LibraryPaperRow } from "@/components/library/library-paper-row";
 import { LibraryPdfDropSurface } from "@/components/library/library-pdf-drop-surface";
 import { LibraryRowMenu } from "@/components/library/library-row-menu";
@@ -34,20 +50,47 @@ import {
 	type SortKey,
 	toggleColumnVisibility,
 } from "@/components/library/library-row-utils";
-import { paperSelectionKey } from "@/components/library/library-selection";
+import {
+	folderSelectionKey,
+	paperSelectionKey,
+} from "@/components/library/library-selection";
 import { LibrarySelectionBar } from "@/components/library/library-selection-bar";
 import { LibraryTableHeader } from "@/components/library/library-table-header";
+import {
+	type LibraryViewMode,
+	LibraryViewToolbar,
+} from "@/components/library/library-view-toolbar";
 import { Button } from "@/components/ui/button";
-import { useWritingStore } from "@/hooks/use-app-stores";
+import {
+	ContextMenuItem,
+	ContextMenuSeparator,
+} from "@/components/ui/context-menu";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+	useLibraryStore,
+	useSettings,
+	useVaultStore,
+	useWritingStore,
+} from "@/hooks/use-app-stores";
 import { useDebouncedCallback } from "@/hooks/use-debounce";
 import { presentAgentComposer } from "@/lib/agent/composer-focus";
 import { broadcastAgentAttachContext } from "@/lib/agent/context-attach";
+import { isTauri } from "@/lib/core/tauri";
 import { cn } from "@/lib/core/utils";
 import type { PaperLibraryRow, PaperMetadata } from "@/lib/paper";
-import { filterPapersByScope } from "@/lib/paper/api";
+import { filterPapersByScope, libraryDropParentDir } from "@/lib/paper/api";
 import { loadCustomProperties } from "@/lib/paper/custom-properties-store";
+import { importLocalPdf } from "@/lib/paper/import-actions";
 import {
 	copyLibraryPapersTo,
+	libraryImport,
 	refreshPaperMetadata,
 	syncLibraryPublication,
 } from "@/lib/paper/library-actions";
@@ -70,6 +113,7 @@ export type PapersLibraryProps = {
 	vaultPath?: string | null;
 	/** When the Library tab is focused — reload heatmaps (after PDF activity). */
 	active?: boolean;
+	visible?: boolean;
 	loading?: boolean;
 	query?: string;
 	/** Controlled search string (lives in App so palette/other callers can clear it). */
@@ -79,6 +123,7 @@ export type PapersLibraryProps = {
 	 * Null/empty = full library. Filters by catalog `path` prefix (recursive).
 	 */
 	scopePath?: string | null;
+	onNavigateFolder?: (path: string | null) => void;
 	onOpenPaper: (paper: PaperMetadata) => void;
 	/**
 	 * Column order + visibility (persisted in settings). When omitted, all
@@ -105,6 +150,18 @@ const HEADER_SCROLL_IDLE_MS = 450;
 const SELECTION_COL_REM = 2;
 /** Trailing custom-property "add column" cell width (rem). */
 const ACTIONS_COL_REM = 2.25;
+const VIEW_MODE_KEY = "agentero-library-view-mode";
+/** Placeholder rows before the catalog's first paint. Not a fake total. */
+const LIBRARY_SKELETON_ROW_KEYS = [
+	"s1",
+	"s2",
+	"s3",
+	"s4",
+	"s5",
+	"s6",
+	"s7",
+	"s8",
+] as const;
 
 /** Radix dialog/menu/popover is open → app-level shortcuts must not fight it. */
 function blockingOverlayOpen(): boolean {
@@ -120,10 +177,12 @@ export function PapersLibrary({
 	papers,
 	vaultPath = null,
 	active = true,
+	visible = active,
 	loading,
 	query = "",
 	onQueryChange,
 	scopePath = null,
+	onNavigateFolder,
 	onOpenPaper,
 	columns = DEFAULT_LIBRARY_COLUMNS,
 	onColumnsChange,
@@ -132,9 +191,21 @@ export function PapersLibrary({
 	className,
 }: PapersLibraryProps) {
 	const reading = useWritingStore((s) => s.surface === "reading");
+	const easyScholarRanks = useSettings((s) => s.easyScholarRanks);
 	const { t: tRaw, i18n } = useTranslation("sidebar");
 	/** Column renderers take plain string keys; cast off strict resource unions. */
 	const t = tRaw as unknown as CellT;
+	const [mode, setMode] = useState<LibraryViewMode>(() => {
+		try {
+			return localStorage.getItem(VIEW_MODE_KEY) === "table"
+				? "table"
+				: "cards";
+		} catch {
+			return "cards";
+		}
+	});
+	const showCards = mode === "cards";
+	const tree = useVaultStore((state) => (showCards ? state.tree : null));
 	const [sortKey, setSortKey] = useState<SortKey>("title");
 	const [sortDir, setSortDir] = useState<SortDir>("asc");
 	/** Selected tag names for header filter (OR: paper matches if it has any). */
@@ -281,6 +352,15 @@ export function PapersLibrary({
 
 	const normalizedQuery = (inputValue ?? "").trim().toLocaleLowerCase();
 	const tagFilterSet = useMemo(() => new Set(tagFilter), [tagFilter]);
+	const tagFilterActive = tagFilterSet.size > 0;
+	const filtering = normalizedQuery.length > 0 || tagFilterActive;
+	const folders = useMemo(
+		() =>
+			tree && vaultPath && !filtering && onNavigateFolder
+				? libraryChildFolders(tree, vaultPath, scopePath, scopedPapers)
+				: [],
+		[tree, vaultPath, filtering, onNavigateFolder, scopePath, scopedPapers],
+	);
 
 	/** Unique tags in the current folder scope (for the tags-column filter menu). */
 	const availableTags = useMemo(() => {
@@ -331,15 +411,39 @@ export function PapersLibrary({
 				row.tags.some((tag) => tagFilterSet.has(tag.name)),
 			);
 		}
+		if (showCards && !filtering) {
+			filtered = filtered.filter(({ paper }) =>
+				paperIsInLibraryFolder(paper.path, scopePath),
+			);
+		}
 		const copy = [...filtered];
-		copy.sort((a, b) => comparePaperRows(a, b, sortKey, sortDir));
+		copy.sort((a, b) =>
+			comparePaperRows(
+				a,
+				b,
+				showCards ? "addedAt" : sortKey,
+				showCards ? "desc" : sortDir,
+			),
+		);
 		return copy;
-	}, [indexedRows, normalizedQuery, tagFilterSet, sortKey, sortDir]);
+	}, [
+		indexedRows,
+		normalizedQuery,
+		tagFilterSet,
+		sortKey,
+		sortDir,
+		showCards,
+		filtering,
+		scopePath,
+	]);
 
 	/** Visible row order (sorted + filtered) — the universe selection lives in. */
 	const order = useMemo(
-		() => rows.map((row) => paperSelectionKey(row.paper)),
-		[rows],
+		() => [
+			...folders.map(({ path }) => folderSelectionKey(path)),
+			...rows.map((row) => paperSelectionKey(row.paper)),
+		],
+		[folders, rows],
 	);
 	const {
 		keys: selectedKeys,
@@ -377,7 +481,7 @@ export function PapersLibrary({
 		[rows],
 	);
 	const previewPaper = useLibraryPreview({
-		active: active && reading,
+		active: active && reading && !showCards,
 		vaultPath,
 		scopePath,
 		paths: previewPaths,
@@ -407,7 +511,7 @@ export function PapersLibrary({
 		onSelect: applyDrag,
 		onDragStart: beginDrag,
 		onCancel: cancelDrag,
-		enabled: active,
+		enabled: active && !showCards,
 	});
 	/**
 	 * Selection mode: the checkbox column only exists while a marquee is being
@@ -472,6 +576,7 @@ export function PapersLibrary({
 			setViewportRem(scrollRef.current.clientWidth / (16 * uiScale));
 	}, [uiScale]);
 	const rowVirtualizer = useVirtualizer({
+		enabled: !showCards,
 		count: rows.length,
 		getScrollElement: () => scrollRef.current,
 		estimateSize: () => Math.round(52 * uiScale),
@@ -489,15 +594,17 @@ export function PapersLibrary({
 	const heatmaps = useLibraryHeatmap({
 		vaultPath,
 		scopedPapers,
-		active,
+		active: active && !showCards,
 		rows,
 		virtualRows,
 	});
 
 	/** Stable t + onCellCopy pair shared by every memoized row. */
-	const cellCtx = useMemo<Pick<CellCtx, "t" | "onCellCopy">>(
-		() => ({ t, onCellCopy }),
-		[t, onCellCopy],
+	const cellCtx = useMemo<
+		Pick<CellCtx, "t" | "onCellCopy" | "easyScholarRanks">
+	>(
+		() => ({ t, onCellCopy, easyScholarRanks }),
+		[t, onCellCopy, easyScholarRanks],
 	);
 
 	/** Selected papers, resolved on action only (never per marquee frame). */
@@ -530,6 +637,25 @@ export function PapersLibrary({
 		},
 		[absPathsForPapers],
 	);
+
+	const collectSelectedPaths = useCallback(() => {
+		const paths = absPathsForPapers(collectSelectedPapers());
+		if (vaultPath) {
+			for (const { path } of folders) {
+				if (selectedKeysRef.current.has(folderSelectionKey(path))) {
+					paths.push(joinVaultPath(vaultPath, path));
+				}
+			}
+		}
+		return paths;
+	}, [absPathsForPapers, collectSelectedPapers, folders, vaultPath]);
+
+	const deleteSelectedItems = useCallback(() => {
+		const paths = collectSelectedPaths();
+		if (!paths.length) return;
+		void trashPathsAndNotify(paths);
+		clearSelection();
+	}, [clearSelection, collectSelectedPaths]);
 
 	/** Papers pending "copy to folder" (dialog open while non-null). */
 	const [copyPapers, setCopyPapers] = useState<PaperLibraryRow[] | null>(null);
@@ -573,6 +699,35 @@ export function PapersLibrary({
 		},
 		[marqueeDidJustDrag, onRowClick, selectRow, selectionActive],
 	);
+
+	const handleCardClick = useCallback(
+		(event: MouseEvent<HTMLButtonElement>, paper: PaperMetadata) => {
+			if (selectionActive || event.shiftKey || event.metaKey || event.ctrlKey) {
+				selectRow(paperSelectionKey(paper), { shift: event.shiftKey });
+			} else {
+				openPaperFromRow(paper);
+			}
+		},
+		[openPaperFromRow, selectRow, selectionActive],
+	);
+
+	const handleViewChange = (next: LibraryViewMode) => {
+		if (next === mode) return;
+		clearSelection();
+		setMode(next);
+		try {
+			localStorage.setItem(VIEW_MODE_KEY, next);
+		} catch {
+			return;
+		}
+	};
+
+	const handleNavigateFolder = onNavigateFolder
+		? (path: string | null) => {
+				clearSelection();
+				onNavigateFolder(path);
+			}
+		: undefined;
 
 	const handleToggleSelected = useCallback(
 		(paper: PaperMetadata, mods: { shift: boolean }) => {
@@ -640,7 +795,7 @@ export function PapersLibrary({
 				selectedCountRef.current > 0
 			) {
 				event.preventDefault();
-				deletePapers(collectSelectedPapers());
+				deleteSelectedItems();
 			}
 		};
 		window.addEventListener("keydown", onKeyDown);
@@ -648,183 +803,274 @@ export function PapersLibrary({
 	}, [
 		active,
 		clearSelection,
-		collectSelectedPapers,
-		deletePapers,
+		deleteSelectedItems,
 		marqueeIsDragging,
 		selectAll,
 	]);
 
-	const filtering = normalizedQuery.length > 0 || tagFilterSet.size > 0;
-	const tagFilterActive = tagFilterSet.size > 0;
-
+	const initialLoad = Boolean(loading) && papers.length === 0;
+	const empty = rows.length === 0 && folders.length === 0;
+	const parentDir = libraryDropParentDir(scopePath);
+	const ioBusy = useLibraryStore((state) => state.ioBusy);
+	const [folderDraft, setFolderDraft] = useState<LibraryFolderDraft | null>(
+		null,
+	);
+	const backgroundItems =
+		vaultPath && isTauri() ? (
+			<>
+				<ContextMenuItem
+					onSelect={() =>
+						setFolderDraft({
+							kind: "create",
+							vaultPath,
+							parentPath: joinVaultPath(vaultPath, parentDir),
+						})
+					}
+				>
+					<FolderPlus className="size-3.5" />
+					{t("fileTree.newFolder")}
+				</ContextMenuItem>
+				{canEditMeta ? (
+					<>
+						<ContextMenuSeparator />
+						<ContextMenuItem
+							disabled={Boolean(ioBusy)}
+							onSelect={() => void importLocalPdf({ parentDir, vaultPath })}
+						>
+							<FileUp className="size-3.5" />
+							{t("papersLibrary.importPdf")}
+						</ContextMenuItem>
+						<ContextMenuItem
+							disabled={Boolean(ioBusy)}
+							onSelect={() => void libraryImport(parentDir)}
+						>
+							<Upload className="size-3.5" />
+							{t("papersLibrary.import")}
+						</ContextMenuItem>
+					</>
+				) : null}
+			</>
+		) : null;
 	let body: ReactNode;
-	if (loading) {
-		body = (
-			<div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground text-sm">
-				{t("papersLibrary.loading")}
+	{
+		const cards = showCards ? (
+			<div
+				key={scopePath ?? "root"}
+				className={cn(
+					"agentero-scroll min-h-0 min-w-0",
+					(!empty || initialLoad) && "flex-1",
+				)}
+				aria-busy={loading || undefined}
+			>
+				{initialLoad ? (
+					<div className="p-5">
+						<p className="sr-only" role="status">
+							{t("papersLibrary.loading")}
+						</p>
+						<Skeleton className="aspect-[4/3] w-56 max-w-full rounded-xl" />
+					</div>
+				) : !empty ? (
+					<LibraryCardView
+						folders={folders}
+						rows={rows}
+						vaultPath={vaultPath}
+						visible={visible}
+						selectedKeys={selectedKeys}
+						selectionActive={selectionActive}
+						onSelect={selectRow}
+						onNavigateFolder={handleNavigateFolder}
+						onRenameFolder={
+							vaultPath && canEditMeta && isTauri()
+								? (path, name) =>
+										setFolderDraft({ kind: "rename", vaultPath, path, name })
+								: undefined
+						}
+						onDeleteFolder={
+							vaultPath && isTauri()
+								? (path) => void trashPathsAndNotify([path])
+								: undefined
+						}
+						onPaperClick={handleCardClick}
+					/>
+				) : null}
+			</div>
+		) : null;
+		const table = (
+			// biome-ignore lint/a11y/noStaticElementInteractions: scroll surface; rows and the header own the real controls
+			// biome-ignore lint/a11y/useKeyWithClickEvents: Escape clears the selection from the keyboard
+			<div
+				ref={setScrollEl}
+				aria-busy={loading || undefined}
+				onPointerDown={onMarqueePointerDown}
+				onClick={handleScrollAreaClick}
+				className={cn(
+					"agentero-scroll-both relative min-w-0",
+					empty && !initialLoad ? "h-auto" : "min-h-0 flex-1",
+				)}
+			>
+				{initialLoad ? (
+					<p className="sr-only" role="status">
+						{t("papersLibrary.loading")}
+					</p>
+				) : null}
+				{/* Fixed weights keep the table stable while content and rows change. */}
+				<table
+					className="table-fixed border-collapse text-left text-sm"
+					style={{
+						width: `${columnWidths.reduce((sum, width) => sum + width, 0) + (selectionActive ? SELECTION_COL_REM : 0) + ACTIONS_COL_REM}rem`,
+					}}
+				>
+					<colgroup>
+						{selectionActive ? (
+							<col style={{ width: `${SELECTION_COL_REM}rem` }} />
+						) : null}
+						{visibleColumns.map((col, index) => (
+							<col
+								key={col.key}
+								style={{
+									width: `${columnWidths[index]}rem`,
+								}}
+							/>
+						))}
+						<col style={{ width: `${ACTIONS_COL_REM}rem` }} />
+					</colgroup>
+					<LibraryTableHeader
+						t={t}
+						columns={columns}
+						visibleColumns={visibleColumns}
+						sortKey={sortKey}
+						sortDir={sortDir}
+						onSort={handleSort}
+						compact={headerCompact}
+						searchEnabled={Boolean(onQueryChange)}
+						inputValue={inputValue}
+						onInputChange={onSearchInputChange}
+						canSyncPublication={canSyncPublication}
+						onSyncPublication={handleSyncPublication}
+						availableTags={availableTags}
+						tagFilterSet={tagFilterSet}
+						tagFilterActive={tagFilterActive}
+						onToggleTagFilter={toggleTagFilter}
+						onClearTagFilter={clearTagFilter}
+						canCustomizeColumns={Boolean(onColumnsChange)}
+						onToggleColumn={toggleColumn}
+						onResetColumns={resetColumns}
+						onColumnReorder={handleColumnReorder}
+						onColumnResize={resizeColumn}
+						vaultPath={vaultPath}
+						showSelection={selectionActive}
+						allSelected={allSelected}
+						someSelected={someSelected}
+						onToggleAll={handleToggleAll}
+					/>
+					{initialLoad ? (
+						<tbody aria-hidden="true">
+							{LIBRARY_SKELETON_ROW_KEYS.map((key, rowIndex) => (
+								<tr key={key} className="border-border/40 border-b">
+									{selectionActive ? <td className="w-8 min-w-8 p-0" /> : null}
+									{visibleColumns.map((col, colIndex) => (
+										<td key={col.key} className="px-3 py-2.5">
+											<Skeleton
+												className={cn(
+													"h-3",
+													colIndex === 0
+														? rowIndex % 3 === 0
+															? "w-3/5"
+															: "w-2/3"
+														: "w-12",
+												)}
+											/>
+										</td>
+									))}
+									<td className="w-9 min-w-9 p-0" />
+								</tr>
+							))}
+						</tbody>
+					) : (
+						<tbody
+							key={reorderKey}
+							className="animate-in fade-in-0 duration-150"
+						>
+							{paddingTop > 0 ? (
+								<tr aria-hidden className="pointer-events-none">
+									<td
+										colSpan={visibleColumns.length + (selectionActive ? 2 : 1)}
+										style={{ height: paddingTop }}
+									/>
+								</tr>
+							) : null}
+							{virtualRows.map((vr) => {
+								const row = rows[vr.index];
+								const p = row.paper;
+								return (
+									<LibraryPaperRow
+										key={p.path ?? p.id}
+										index={vr.index}
+										row={row}
+										heat={heatmaps.get(heatmapCacheKey(p))}
+										visibleColumns={visibleColumns}
+										ctx={cellCtx}
+										showSelection={selectionActive}
+										selected={selectedKeys.has(paperSelectionKey(p))}
+										onToggleSelected={handleToggleSelected}
+										onRowClick={handleRowClick}
+										onHoverPaper={handleHoverPaper}
+										onLeavePaper={previewPaper.cancel}
+										measureRef={rowVirtualizer.measureElement}
+									/>
+								);
+							})}
+							{paddingBottom > 0 ? (
+								<tr aria-hidden className="pointer-events-none">
+									<td
+										colSpan={visibleColumns.length + (selectionActive ? 2 : 1)}
+										style={{ height: paddingBottom }}
+									/>
+								</tr>
+							) : null}
+						</tbody>
+					)}
+				</table>
+				{/* Marquee box: positioned in scroll-content coordinates so it
+					    stays glued to the rows while the list auto-scrolls. */}
+				<div
+					ref={marqueeOverlayRef}
+					aria-hidden
+					className="pointer-events-none absolute z-20 hidden rounded-[3px] border border-primary/50 bg-primary/10"
+				/>
+				{!empty && !initialLoad ? (
+					<p className="sticky left-0 border-border/40 border-t px-3 py-2 text-muted-foreground text-xs tracking-wide">
+						{selectedCount > 0
+							? t("papersLibrary.selection.countWithTotal", {
+									selected: new Intl.NumberFormat(i18n.language).format(
+										selectedCount,
+									),
+									total: new Intl.NumberFormat(i18n.language).format(
+										rows.length,
+									),
+								})
+							: t("papersLibrary.count", {
+									count: rows.length,
+									formatted: new Intl.NumberFormat(i18n.language).format(
+										rows.length,
+									),
+								})}
+					</p>
+				) : null}
 			</div>
 		);
-	} else {
-		const empty = rows.length === 0;
 		body = (
 			<>
-				{/* biome-ignore lint/a11y/noStaticElementInteractions: scroll surface; rows and the header own the real controls */}
-				{/* biome-ignore lint/a11y/useKeyWithClickEvents: Escape clears the selection from the keyboard */}
-				<div
-					ref={setScrollEl}
-					onPointerDown={onMarqueePointerDown}
-					onClick={handleScrollAreaClick}
-					className={cn(
-						"agentero-scroll-both relative min-w-0",
-						empty ? "h-auto" : "min-h-0 flex-1",
-					)}
-				>
-					{/* Fixed weights keep the table stable while content and rows change. */}
-					<table
-						className="table-fixed border-collapse text-left text-sm"
-						style={{
-							width: `${columnWidths.reduce((sum, width) => sum + width, 0) + (selectionActive ? SELECTION_COL_REM : 0) + ACTIONS_COL_REM}rem`,
-						}}
-					>
-						<colgroup>
-							{selectionActive ? (
-								<col style={{ width: `${SELECTION_COL_REM}rem` }} />
-							) : null}
-							{visibleColumns.map((col, index) => (
-								<col
-									key={col.key}
-									style={{
-										width: `${columnWidths[index]}rem`,
-									}}
-								/>
-							))}
-							<col style={{ width: `${ACTIONS_COL_REM}rem` }} />
-						</colgroup>
-						<LibraryTableHeader
-							t={t}
-							columns={columns}
-							visibleColumns={visibleColumns}
-							sortKey={sortKey}
-							sortDir={sortDir}
-							onSort={handleSort}
-							compact={headerCompact}
-							searchEnabled={Boolean(onQueryChange)}
-							inputValue={inputValue}
-							onInputChange={onSearchInputChange}
-							canSyncPublication={canSyncPublication}
-							onSyncPublication={handleSyncPublication}
-							availableTags={availableTags}
-							tagFilterSet={tagFilterSet}
-							tagFilterActive={tagFilterActive}
-							onToggleTagFilter={toggleTagFilter}
-							onClearTagFilter={clearTagFilter}
-							canCustomizeColumns={Boolean(onColumnsChange)}
-							onToggleColumn={toggleColumn}
-							onResetColumns={resetColumns}
-							onColumnReorder={handleColumnReorder}
-							onColumnResize={resizeColumn}
-							vaultPath={vaultPath}
-							showSelection={selectionActive}
-							allSelected={allSelected}
-							someSelected={someSelected}
-							onToggleAll={handleToggleAll}
-						/>
-						{/* One shared menu for the whole body: single-row actions, or
-						    batch actions when the right-clicked row is selected. */}
-						<LibraryRowMenu
-							rows={rows}
-							vaultPath={vaultPath}
-							canEditMeta={canEditMeta}
-							selectedKeys={selectedKeys}
-							onOpenPaper={openPaperFromRow}
-							onRefreshMetadata={handleRefreshPaperMetadata}
-							onAddToChat={addPapersToChat}
-							onCopyPapers={openCopyDialog}
-							onDeletePapers={deletePapers}
-							onClearSelection={clearSelection}
-							onPrepareContext={prepareContext}
-							t={t}
-						>
-							{/* key={reorderKey} remounts the tbody to replay the fade animation. */}
-							<tbody
-								key={reorderKey}
-								className="animate-in fade-in-0 duration-150"
-							>
-								{paddingTop > 0 ? (
-									<tr aria-hidden className="pointer-events-none">
-										<td
-											colSpan={
-												visibleColumns.length + (selectionActive ? 2 : 1)
-											}
-											style={{ height: paddingTop }}
-										/>
-									</tr>
-								) : null}
-								{virtualRows.map((vr) => {
-									const row = rows[vr.index];
-									const p = row.paper;
-									return (
-										<LibraryPaperRow
-											key={p.path ?? p.id}
-											index={vr.index}
-											row={row}
-											heat={heatmaps.get(heatmapCacheKey(p))}
-											visibleColumns={visibleColumns}
-											ctx={cellCtx}
-											showSelection={selectionActive}
-											selected={selectedKeys.has(paperSelectionKey(p))}
-											onToggleSelected={handleToggleSelected}
-											onRowClick={handleRowClick}
-											onHoverPaper={handleHoverPaper}
-											onLeavePaper={previewPaper.cancel}
-											measureRef={rowVirtualizer.measureElement}
-										/>
-									);
-								})}
-								{paddingBottom > 0 ? (
-									<tr aria-hidden className="pointer-events-none">
-										<td
-											colSpan={
-												visibleColumns.length + (selectionActive ? 2 : 1)
-											}
-											style={{ height: paddingBottom }}
-										/>
-									</tr>
-								) : null}
-							</tbody>
-						</LibraryRowMenu>
-					</table>
-					{/* Marquee box: positioned in scroll-content coordinates so it
-					    stays glued to the rows while the list auto-scrolls. */}
-					<div
-						ref={marqueeOverlayRef}
-						aria-hidden
-						className="pointer-events-none absolute z-20 hidden rounded-[3px] border border-primary/50 bg-primary/10"
-					/>
-					{!empty ? (
-						<p className="sticky left-0 border-border/40 border-t px-3 py-2 text-muted-foreground text-xs tracking-wide">
-							{selectedCount > 0
-								? t("papersLibrary.selection.countWithTotal", {
-										selected: new Intl.NumberFormat(i18n.language).format(
-											selectedCount,
-										),
-										total: new Intl.NumberFormat(i18n.language).format(
-											rows.length,
-										),
-									})
-								: t("papersLibrary.count", {
-										count: rows.length,
-										formatted: new Intl.NumberFormat(i18n.language).format(
-											rows.length,
-										),
-									})}
-						</p>
-					) : null}
-				</div>
+				{cards ?? table}
 				<LibrarySelectionBar
 					count={selectedCount}
-					onAddToChat={() => addPapersToChat(collectSelectedPapers())}
-					onDelete={() => deletePapers(collectSelectedPapers())}
+					onAddToChat={() => {
+						const paths = collectSelectedPaths();
+						if (!paths.length) return;
+						broadcastAgentAttachContext(paths);
+						presentAgentComposer();
+					}}
+					onDelete={deleteSelectedItems}
 					onClear={clearSelection}
 				/>
 				<LibraryCopyDialog
@@ -836,7 +1082,7 @@ export function PapersLibrary({
 					}}
 					onConfirm={confirmCopy}
 				/>
-				{empty ? (
+				{empty && !initialLoad ? (
 					<div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
 						<p className="font-medium text-sm">
 							{filtering
@@ -870,8 +1116,94 @@ export function PapersLibrary({
 	}
 
 	return (
-		<LibraryPdfDropSurface scopePath={scopePath} className={className}>
-			{body}
+		<LibraryPdfDropSurface
+			scopePath={showCards ? (scopePath ?? "papers") : scopePath}
+			className={className}
+		>
+			<LibraryViewToolbar
+				mode={mode}
+				onModeChange={handleViewChange}
+				scopePath={scopePath}
+				onNavigateFolder={handleNavigateFolder}
+				query={inputValue}
+				onSearch={onQueryChange ? onSearchInputChange : undefined}
+			>
+				{showCards && (availableTags.length > 0 || tagFilterActive) ? (
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon-sm"
+								aria-label={t("papersLibrary.filterTags")}
+								title={t("papersLibrary.filterTags")}
+								className={
+									tagFilterActive
+										? "bg-accent text-accent-foreground"
+										: "text-muted-foreground"
+								}
+							>
+								<ListFilter aria-hidden />
+							</Button>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent
+							align="end"
+							className="max-h-64 overflow-y-auto"
+						>
+							{availableTags.map((tag) => (
+								<DropdownMenuItem
+									key={tag.name}
+									role="menuitemcheckbox"
+									aria-checked={tagFilterSet.has(tag.name)}
+									onSelect={(event) => {
+										event.preventDefault();
+										toggleTagFilter(tag.name);
+									}}
+								>
+									<Check
+										className={cn(!tagFilterSet.has(tag.name) && "invisible")}
+										aria-hidden
+									/>
+									{tag.name}
+								</DropdownMenuItem>
+							))}
+							{tagFilterActive ? (
+								<>
+									<DropdownMenuSeparator />
+									<DropdownMenuItem onSelect={clearTagFilter}>
+										{t("papersLibrary.clearTagFilter")}
+									</DropdownMenuItem>
+								</>
+							) : null}
+						</DropdownMenuContent>
+					</DropdownMenu>
+				) : null}
+			</LibraryViewToolbar>
+			<LibraryRowMenu
+				rows={rows}
+				vaultPath={vaultPath}
+				canEditMeta={canEditMeta}
+				selectedKeys={selectedKeys}
+				onOpenPaper={openPaperFromRow}
+				onRefreshMetadata={handleRefreshPaperMetadata}
+				onAddToChat={addPapersToChat}
+				onCopyPapers={openCopyDialog}
+				onDeletePapers={deletePapers}
+				onClearSelection={clearSelection}
+				onPrepareContext={prepareContext}
+				backgroundItems={backgroundItems}
+				t={t}
+			>
+				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+					{body}
+				</div>
+			</LibraryRowMenu>
+			{active && folderDraft && folderDraft.vaultPath === vaultPath ? (
+				<LibraryFolderNameDialog
+					draft={folderDraft}
+					onClose={() => setFolderDraft(null)}
+				/>
+			) : null}
 		</LibraryPdfDropSurface>
 	);
 }

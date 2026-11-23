@@ -12,6 +12,7 @@ import {
 	clearLayoutSentenceHover,
 	heldLayoutSentenceDocument,
 	type LayoutSentenceHover,
+	layoutSentenceCatalogItems,
 	layoutSentenceHover,
 	layoutSentenceLineRects,
 	releaseLayoutSentenceHover,
@@ -20,25 +21,36 @@ import {
 	suppressLayoutSentenceHover,
 	syncLayoutSentencePointer,
 } from "@/components/viewer/pdf/layout-sentence-hover";
+import { MOTION_MS, prefersReducedMotion } from "@/lib/core/motion";
 import {
 	LAYOUT_REGION_CLICK_MOVE_TOLERANCE_PX,
 	layoutSentenceScope,
 } from "@/lib/pdf/layout";
-import { sourceSentenceHoverBands } from "@/lib/pdf/layout/element-sentence";
-import { translatedSelectionLineRects } from "@/lib/pdf/layout/visible-selection-rects";
+import {
+	companionReflowSentenceBands,
+	sourceSentenceHoverBands,
+} from "@/lib/pdf/layout/element-sentence";
+import {
+	translatedSelectionLineRects,
+	translatedSentenceAtPoint,
+} from "@/lib/pdf/layout/visible-selection-rects";
 import { linkPreviewDragActive } from "@/lib/pdf/link-preview-drag";
 import { synctexHoverSupersedes } from "@/lib/tex/synctex-boxes";
 
+/** Kept in sync with `--motion-duration-micro` in index.css. */
+const SENTENCE_BAND_FADE_MS = MOTION_MS.micro;
+
 function spanFromTarget(
-	target: EventTarget | null,
+	event: PointerEvent,
 ): { itemId: string; sentenceIndex: number } | null {
+	const { target, clientX, clientY } = event;
 	if (!(target instanceof Element)) return null;
-	const span = target.closest("[data-sentence]");
-	const item = span?.closest("[data-layout-item]");
-	if (!span || !item) return null;
-	const itemId = item.getAttribute("data-layout-item");
-	const sentenceIndex = Number(span.getAttribute("data-sentence"));
-	if (!itemId || !Number.isInteger(sentenceIndex)) return null;
+	const span = translatedSentenceAtPoint(target, clientX, clientY);
+	const index = span?.getAttribute("data-sentence");
+	const itemId =
+		span?.closest<HTMLElement>("[data-layout-item]")?.dataset.layoutItem;
+	const sentenceIndex = Number(index);
+	if (index == null || !itemId || !Number.isInteger(sentenceIndex)) return null;
 	return { itemId, sentenceIndex };
 }
 
@@ -67,7 +79,11 @@ function selectionOwns(
 	return dx * dx + dy * dy > limit * limit;
 }
 
-/** Sentence hover stays active during reading and element selection. */
+/**
+ * Sentence hover stays active during reading and element selection.
+ * `enabled: false` turns off both the hover wash and the double-click sentence
+ * selection; the writing preview keeps only its SyncTeX line hover.
+ */
 export function usePdfSentenceInteraction(
 	docId: string,
 	hostRef: RefObject<HTMLElement | null>,
@@ -75,10 +91,13 @@ export function usePdfSentenceInteraction(
 		sentence: LayoutSentenceHover,
 		event: MouseEvent,
 	) => void,
+	options?: { enabled?: boolean },
 ): void {
+	const enabled = options?.enabled ?? true;
 	const doubleClickRef = useRef(onSentenceDoubleClick);
 	doubleClickRef.current = onSentenceDoubleClick;
 	useEffect(() => {
+		if (!enabled) return;
 		const root = hostRef.current;
 		if (!root) return;
 		let origin: { x: number; y: number } | null = null;
@@ -103,7 +122,6 @@ export function usePdfSentenceInteraction(
 				return;
 			}
 			releaseLayoutSentenceHover();
-			const span = spanFromTarget(event.target);
 			const page =
 				event.target instanceof Element
 					? event.target.closest<HTMLElement>(`[${EMBED_PAGE_ATTR}]`)
@@ -120,6 +138,7 @@ export function usePdfSentenceInteraction(
 			}
 			const box = page.getBoundingClientRect();
 			if (!box.width || !box.height) return;
+			const span = spanFromTarget(event);
 			syncLayoutSentencePointer({
 				docId,
 				regionId: span?.itemId ?? "",
@@ -193,7 +212,7 @@ export function usePdfSentenceInteraction(
 			const current = layoutSentenceHover();
 			if (current?.docId === docId) clearLayoutSentenceHover();
 		};
-	}, [docId, hostRef]);
+	}, [docId, hostRef, enabled]);
 }
 
 /**
@@ -215,16 +234,43 @@ export function PdfSentenceHighlight({
 		const shell = layer?.parentElement;
 		if (!layer || !shell) return;
 		let paintedKey: string | null = null;
-		let fadeTimer = 0;
+		let hideTimer = 0;
+		const fadeTimers = new Set<number>();
+
+		/** Bands of the current sentence; `is-leaving` ones are already fading. */
+		const liveBands = () =>
+			Array.from(layer.children).filter(
+				(node): node is HTMLElement =>
+					node instanceof HTMLElement && !node.classList.contains("is-leaving"),
+			);
+
+		/** Fade the previous sentence out under the new one, never delaying it. */
+		const retireBands = (nodes: readonly HTMLElement[]) => {
+			if (nodes.length > 0) {
+				if (prefersReducedMotion()) {
+					for (const node of nodes) node.remove();
+				} else {
+					for (const node of nodes) node.classList.add("is-leaving");
+					const timer = window.setTimeout(() => {
+						fadeTimers.delete(timer);
+						for (const node of nodes) node.remove();
+					}, SENTENCE_BAND_FADE_MS);
+					fadeTimers.add(timer);
+				}
+			}
+			window.clearTimeout(hideTimer);
+			hideTimer = window.setTimeout(() => {
+				hideTimer = 0;
+				if (liveBands().length > 0) return;
+				layer.classList.remove("is-on");
+			}, SENTENCE_BAND_FADE_MS);
+		};
 
 		const clear = () => {
 			if (paintedKey === null && !layer.classList.contains("is-on")) return;
 			paintedKey = null;
-			layer.classList.remove("is-on");
-			window.clearTimeout(fadeTimer);
-			fadeTimer = window.setTimeout(() => {
-				if (!layer.classList.contains("is-on")) layer.replaceChildren();
-			}, 80);
+			layer.classList.remove("is-held");
+			retireBands(liveBands());
 		};
 		const paint = () => {
 			const action = layoutElementActionStore.getState().action;
@@ -249,8 +295,16 @@ export function PdfSentenceHighlight({
 			const box = shell.getBoundingClientRect();
 			if (!box.width || !box.height) return;
 			const content = document.createDocumentFragment();
-			const append = (x: number, y: number, w: number, h: number) => {
+			const append = (
+				x: number,
+				y: number,
+				w: number,
+				h: number,
+				sourceGeometry = false,
+			) => {
 				const band = document.createElement("span");
+				band.className = "pdf-sentence-band";
+				if (sourceGeometry) band.dataset.sourceGeometry = "";
 				Object.assign(band.style, {
 					left: `${x * 100}%`,
 					top: `${y * 100}%`,
@@ -259,7 +313,7 @@ export function PdfSentenceHighlight({
 				});
 				content.append(band);
 			};
-			if (source) {
+			const appendSourceBands = () => {
 				const lines = layoutSentenceLineRects(docId, pageIndex);
 				for (const rect of sourceSentenceHoverBands(
 					mine.members
@@ -269,7 +323,10 @@ export function PdfSentenceHighlight({
 					Math.round(box.height),
 					lines.length ? lines : undefined,
 				))
-					append(rect.x, rect.y, rect.w, rect.h);
+					append(rect.x, rect.y, rect.w, rect.h, true);
+			};
+			if (source) {
+				appendSourceBands();
 			} else {
 				for (const member of mine.members) {
 					if (member.pageIndex !== pageIndex) continue;
@@ -288,20 +345,47 @@ export function PdfSentenceHighlight({
 						}
 					}
 				}
+				// Reflow not finished, or the block has no sentence spans: the
+				// translation page is still the source PDF, or the placed
+				// translation has no `[data-sentence]` node. Either way a cleared
+				// layer is the bug — paint the placed translation, then the
+				// source glyphs.
+				if (!content.childElementCount) {
+					const placed = companionReflowSentenceBands(
+						layoutSentenceCatalogItems(docId),
+						mine.members,
+						pageIndex,
+					);
+					if (placed?.length) {
+						for (const rect of placed) append(rect.x, rect.y, rect.w, rect.h);
+					} else {
+						appendSourceBands();
+					}
+				}
 			}
 			if (!content.childElementCount) {
 				clear();
 				return;
 			}
-			// Swap the band in place. Fading the old sentence out before showing
-			// the next one drops every block the pointer crosses during that fade.
-			window.clearTimeout(fadeTimer);
+			// Crossfade: the new sentence paints on the same frame under the
+			// pointer, while the previous one fades out beneath it. Fading the old
+			// one out *before* showing the next dropped every block the pointer
+			// crossed during that fade.
+			const sameSentence = paintedKey === mine.key;
+			const previous = liveBands();
+			if (sameSentence) {
+				// Zoom / resize on the same sentence: replace without a fade.
+				for (const node of previous) node.remove();
+			} else {
+				retireBands(previous);
+			}
+			window.clearTimeout(hideTimer);
+			hideTimer = 0;
 			paintedKey = mine.key;
-			layer.style.setProperty(
-				"--pdf-sentence-opacity",
-				selectedDocument ? "28%" : "12%",
-			);
-			layer.replaceChildren(content);
+			// A hovered sentence is a light wash, a pinned one a denser wash; the
+			// weights live in index.css so no caller sets an opacity (see there).
+			layer.classList.toggle("is-held", Boolean(selectedDocument));
+			layer.append(content);
 			layer.classList.add("is-on");
 		};
 		const unsubscribe = subscribeLayoutSentenceHover(paint);
@@ -314,7 +398,10 @@ export function PdfSentenceHighlight({
 			unsubscribe();
 			unsubscribeAction();
 			observer?.disconnect();
-			window.clearTimeout(fadeTimer);
+			window.clearTimeout(hideTimer);
+			for (const timer of fadeTimers) window.clearTimeout(timer);
+			layer.replaceChildren();
+			layer.classList.remove("is-on", "is-held");
 		};
 	}, [docId, pageIndex, source]);
 	return (

@@ -127,6 +127,9 @@ impl AgentTemplate {
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDescriptor {
+    /// Custom ACP harness can invoke local shell commands.
+    #[serde(default)]
+    pub supports_shell: bool,
     pub id: String,
     pub name: String,
     pub template: AgentTemplate,
@@ -361,6 +364,9 @@ pub struct CatalogScanResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertAgentRequest {
+    /// Custom ACP harness can invoke local shell commands.
+    #[serde(default)]
+    pub supports_shell: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
@@ -427,6 +433,10 @@ pub struct RunOnceRequest {
     /// Preferred model id from ACP session config (category: model). Applied after session/new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    /// Force one `session/set_config_option` for `model_id` even when the agent
+    /// reports it as current. Set for explicit user picks only (Fix #1087).
+    #[serde(default)]
+    pub force_model: bool,
     /// Preferred Codex-style collaboration mode (`collaboration_mode`), e.g. default / plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collaboration_mode_id: Option<String>,
@@ -463,7 +473,7 @@ pub struct RunOnceRequest {
     pub hide_from_chat_history: bool,
     /// Selection, open paper, and @ mentions for this turn.
     /// The host resolver writes the minimum evidence into the prompt and, for a
-    /// local session, attaches the session-scoped `agentero-context` MCP.
+    /// local session, binds the evidence CLI to this turn.
     /// Omit when the turn has no vault anchor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<agentero_core::features::context::ContextRequest>,
@@ -500,7 +510,11 @@ pub struct AgentResultPayload {
     /// ACP agent thought / reasoning (from AgentThoughtChunk), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    #[serde(default)]
+    pub prompt_only: bool,
     pub sources: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<agentero_core::features::context::PresentedFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     /// Durable ACP provider session id for the next continue
@@ -679,6 +693,9 @@ pub struct AgentModelsEvent {
     pub agent_id: String,
     /// ACP config option id for the model selector.
     pub config_id: String,
+    /// Model the agent reports as active. Empty means the agent did not report
+    /// one; never invent it from the catalog — upstream agents can misreport
+    /// `current` (see #1087), and callers treat empty as "unknown, always set".
     pub current_id: String,
     pub models: Vec<AgentModelChoice>,
 }
@@ -693,6 +710,10 @@ pub struct WarmRequest {
     pub vault_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    /// Force one `session/set_config_option` for `model_id` even when the agent
+    /// reports it as current. Set for explicit user picks only (Fix #1087).
+    #[serde(default)]
+    pub force_model: bool,
     /// Preferred collaboration mode (`collaboration_mode`: default / plan).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collaboration_mode_id: Option<String>,
@@ -705,6 +726,8 @@ pub struct WarmResult {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<AgentModelsEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration: Option<AgentCollaborationEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_used: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -837,6 +860,8 @@ pub struct AcpHistoryLine {
     pub parts: Vec<AcpHistoryPart>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<agentero_core::features::context::PresentedFile>,
 }
 
 /// Response for `agent_delete_session`.

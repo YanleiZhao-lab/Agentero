@@ -4,19 +4,30 @@
 //! Implements the [`RemoteStore`] contract; retry/error plumbing is shared
 //! in `store.rs`.
 //!
-//! Conditional writes are mandatory; never retry as an unconditional PUT.
+//! The HEAD protocol requires conditional writes. The opt-in journal writes
+//! immutable records and blobs with plain PUT in a separate store.
 
 use crate::error::AppError;
 use crate::features::sync::config::{normalize_webdav_url, SyncBackendConfig};
 use crate::features::sync::store::{
-    check, etag_of, send_with_retries, PutCondition, PutOutcome, RemoteStore,
+    check, etag_of, send_with_retries, LockOutcome, PutCondition, PutOutcome, RemoteStore,
+    PUBLISH_LOCK_TTL_SECS,
 };
 use crate::http;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Mutex;
 
 const PROPFIND_BODY: &[u8] = br#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"#;
+
+// A provider may return 750 rows including the collection itself with no
+// continuation marker. The boundary applies to each directory independently.
+pub(super) const JOURNAL_LIST_LIMIT: usize = 749;
+
+/// Lock listing asks for the server clock (`getlastmodified`) so arbitration
+/// never depends on client clock skew.
+const PROPFIND_LOCKS_BODY: &[u8] = br#"<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:"><d:prop><d:getlastmodified/><d:resourcetype/></d:prop></d:propfind>"#;
 
 pub struct WebdavClient {
     http: reqwest::Client,
@@ -33,6 +44,97 @@ pub struct WebdavClient {
 }
 
 impl WebdavClient {
+    pub(super) async fn journal_put(&self, key: &str, body: Vec<u8>) -> Result<(), AppError> {
+        self.ensure_parent_dirs(key).await?;
+        let response = self
+            .send(reqwest::Method::PUT, &self.url_for(key), &[], body)
+            .await?;
+        check(response, "PUT", key).await.map(|_| ())
+    }
+
+    /// Only the successful creator of this collection may initialize vault.json.
+    pub(super) async fn create_journal(&self) -> Result<(), AppError> {
+        if !self.list_collection("").await?.is_empty() {
+            return Err(AppError::message(
+                "initialize the WebDAV journal in an empty directory",
+            ));
+        }
+        let url = format!("{}/", self.url_for("manifests"));
+        let response = self.send(method("MKCOL")?, &url, &[], Vec::new()).await?;
+        if response.status() != reqwest::StatusCode::CREATED {
+            return Err(AppError::message(format!(
+                "journal initialization did not acquire the collection ({})",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn list_journal_records(&self) -> Result<BTreeSet<String>, AppError> {
+        let invalid = || AppError::message("unexpected WebDAV journal entry");
+        let mut records = BTreeSet::new();
+        for bucket in self.list_collection("manifests").await? {
+            if bucket.len() != 1 || !bucket.bytes().all(lower_hex) {
+                return Err(invalid());
+            }
+            for name in self.list_collection(&format!("manifests/{bucket}")).await? {
+                let id = name
+                    .strip_suffix(".json")
+                    .filter(|id| {
+                        id.starts_with(&bucket) && id.len() == 64 && id.bytes().all(lower_hex)
+                    })
+                    .ok_or_else(invalid)?;
+                records.insert(id.to_owned());
+            }
+        }
+        Ok(records)
+    }
+
+    pub(super) async fn test_journal(&self) -> Result<(), AppError> {
+        self.list_journal_records().await?;
+        let key = format!(".sync-probe-{}", uuid::Uuid::new_v4().simple());
+        self.journal_put(&key, b"journal".to_vec()).await?;
+        let read = self.get(&key).await;
+        self.delete(&key).await?;
+        if read?.is_none_or(|(body, _)| body != b"journal") {
+            return Err(AppError::message(
+                "WebDAV journal probe could not read its upload",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn journal_record(
+        &self,
+        key: &str,
+        limit: usize,
+    ) -> Result<Vec<u8>, AppError> {
+        let response = self
+            .send(reqwest::Method::GET, &self.url_for(key), &[], Vec::new())
+            .await?;
+        read_limited(check(response, "GET", key).await?, limit).await
+    }
+
+    async fn list_collection(&self, key: &str) -> Result<BTreeSet<String>, AppError> {
+        let url = format!("{}/", self.url_for(key).trim_end_matches('/'));
+        let response = self
+            .send(
+                method("PROPFIND")?,
+                &url,
+                &[("Depth", "1".into())],
+                PROPFIND_BODY.to_vec(),
+            )
+            .await?;
+        if response.status() != reqwest::StatusCode::MULTI_STATUS {
+            return Err(AppError::message(format!(
+                "incomplete WebDAV listing ({})",
+                response.status()
+            )));
+        }
+        let bytes = read_limited(response, 4 * 1024 * 1024).await?;
+        collection_entries(&url, &bytes)
+    }
+
     pub fn new(cfg: &SyncBackendConfig) -> Result<Self, AppError> {
         // `normalized()` only runs on save; re-normalize so configs persisted
         // before the Jianguoyun-root expansion exist are healed on read.
@@ -243,13 +345,9 @@ impl RemoteStore for WebdavClient {
         condition: PutCondition,
     ) -> Result<PutOutcome, AppError> {
         self.ensure_parent_dirs(key).await?;
+        let headers: Vec<(&str, String)> = condition.header()?.into_iter().collect();
         let resp = self
-            .send(
-                method("PUT")?,
-                &self.url_for(key),
-                &[condition.header()?],
-                body,
-            )
+            .send(method("PUT")?, &self.url_for(key), &headers, body)
             .await?;
         if resp.status() == reqwest::StatusCode::PRECONDITION_FAILED {
             return Ok(PutOutcome::PreconditionFailed);
@@ -264,6 +362,259 @@ impl RemoteStore for WebdavClient {
         let cleanup = self.delete(&key).await;
         result.and_then(|supported| cleanup.map(|_| supported))
     }
+
+    /// Joplin-style soft lock: PUT this device's lock file, list `locks/`,
+    /// and let deterministic arbitration (oldest live lock wins, ties by
+    /// device id) decide the holder. Only needs PUT + PROPFIND — both work
+    /// on servers that ignore conditional headers (fnOS built-in WebDAV).
+    async fn try_acquire_publish_lock(&self, device_id: &str) -> Result<LockOutcome, AppError> {
+        let key = lock_key(device_id)?;
+        self.ensure_parent_dirs(&key).await?;
+        let body = serde_json::to_vec(&LockInfo {
+            device_id: device_id.to_string(),
+            acquired_at: crate::time::now_rfc3339_millis(),
+        })?;
+        self.put(&key, body, PutCondition::Unconditional).await?;
+        let listed = self.list_locks().await;
+        let candidates = match listed {
+            Ok(c) => c,
+            Err(e) => {
+                // Cannot arbitrate without a listing; leave no lock behind.
+                let _ = self.delete(&key).await;
+                return Err(e);
+            }
+        };
+        let now = chrono::Utc::now().timestamp();
+        match arbitrate_locks(&candidates, now, PUBLISH_LOCK_TTL_SECS) {
+            Some(winner) if winner == device_id => Ok(LockOutcome::Acquired),
+            _ => {
+                let _ = self.delete(&key).await;
+                Ok(LockOutcome::Busy)
+            }
+        }
+    }
+
+    async fn release_publish_lock(&self, device_id: &str) -> Result<(), AppError> {
+        self.delete(&lock_key(device_id)?).await
+    }
+}
+
+/// One lock file's arbitration evidence: device id plus its timestamp in
+/// server-clock seconds (PROPFIND `getlastmodified`), falling back to the
+/// lock content's `acquiredAt` when the server omits the property.
+struct LockCandidate {
+    device_id: String,
+    ts: i64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LockInfo {
+    device_id: String,
+    acquired_at: String,
+}
+
+/// Lock files live at `locks/<deviceId>.json`; the id is a persisted UUID,
+/// but validate anyway so a hostile value cannot escape the directory.
+fn lock_key(device_id: &str) -> Result<String, AppError> {
+    if device_id.is_empty()
+        || device_id.len() > 64
+        || !device_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(AppError::message("invalid sync device id"));
+    }
+    Ok(format!("locks/{device_id}.json"))
+}
+
+/// Deterministic winner among live locks: oldest timestamp first, ties by
+/// lexicographic device id. Expired locks are ignored. Pure so arbitration
+/// is unit-testable without HTTP.
+fn arbitrate_locks(candidates: &[LockCandidate], now: i64, ttl: i64) -> Option<String> {
+    candidates
+        .iter()
+        .filter(|c| now.saturating_sub(c.ts) < ttl && c.ts <= now.saturating_add(ttl))
+        .min_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.device_id.cmp(&b.device_id)))
+        .map(|c| c.device_id.clone())
+}
+
+impl WebdavClient {
+    /// PROPFIND Depth:1 over `locks/`, reduced to arbitration candidates.
+    async fn list_locks(&self) -> Result<Vec<LockCandidate>, AppError> {
+        let url = format!("{}/", self.url_for("locks"));
+        let resp = self
+            .send(
+                method("PROPFIND")?,
+                &url,
+                &[("Depth", "1".to_string())],
+                PROPFIND_LOCKS_BODY.to_vec(),
+            )
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        let resp = check(resp, "PROPFIND", "locks").await?;
+        let xml = resp
+            .text()
+            .await
+            .map_err(|e| AppError::message(format!("PROPFIND locks: {e}")))?;
+        let mut out = Vec::new();
+        let doc = roxmltree::Document::parse(&xml)
+            .map_err(|e| AppError::message(format!("PROPFIND locks: invalid XML: {e}")))?;
+        for response in doc.descendants().filter(|n| n.has_tag_name("response")) {
+            let href = response
+                .children()
+                .find(|n| n.has_tag_name("href"))
+                .and_then(|n| n.text())
+                .unwrap_or_default();
+            // The collection itself and anything but lock files are noise.
+            if href.ends_with('/') {
+                continue;
+            }
+            let name = percent_decode(href.rsplit('/').find(|s| !s.is_empty()).unwrap_or_default());
+            let Some(device_id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if lock_key(device_id).is_err() {
+                continue;
+            }
+            let mtime = response
+                .descendants()
+                .find(|n| n.has_tag_name("getlastmodified"))
+                .and_then(|n| n.text())
+                .and_then(parse_http_date);
+            let ts = match mtime {
+                Some(ts) => ts,
+                None => {
+                    // Server omits getlastmodified: fall back to the lock's
+                    // own content timestamp (client clock; documented risk).
+                    let key = format!("locks/{name}");
+                    match self.get(&key).await? {
+                        Some((bytes, _)) => serde_json::from_slice::<LockInfo>(&bytes)
+                            .ok()
+                            .and_then(|info| {
+                                chrono::DateTime::parse_from_rfc3339(&info.acquired_at).ok()
+                            })
+                            .map(|dt| dt.timestamp())
+                            .unwrap_or(0),
+                        None => continue,
+                    }
+                }
+            };
+            out.push(LockCandidate {
+                device_id: device_id.to_string(),
+                ts,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) as RFC 4918 requires;
+/// RFC 2822 (`+0000`) as a lenient second chance.
+fn parse_http_date(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%a, %d %b %Y %H:%M:%S GMT") {
+        return Some(dt.and_utc().timestamp());
+    }
+    chrono::DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+async fn read_limited(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, AppError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| AppError::message(e.to_string()))?
+    {
+        if chunk.len() > limit - bytes.len() {
+            return Err(AppError::message("WebDAV journal response too large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn lower_hex(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'a'..=b'f')
+}
+
+fn collection_entries(url: &str, bytes: &[u8]) -> Result<BTreeSet<String>, AppError> {
+    let invalid = || AppError::message("incomplete WebDAV directory listing");
+    let document = roxmltree::Document::parse(std::str::from_utf8(bytes).map_err(|_| invalid())?)
+        .map_err(|_| invalid())?;
+    let root = document.root_element();
+    let base = url::Url::parse(url).map_err(|_| invalid())?;
+    let dav = |tag| ("DAV:", tag);
+    if !root.has_tag_name(dav("multistatus")) {
+        return Err(invalid());
+    }
+    let mut names = BTreeSet::new();
+    let mut saw_self = false;
+    for row in root.children().filter(|n| n.is_element()) {
+        if !row.has_tag_name(dav("response")) {
+            return Err(invalid());
+        }
+        let href = row
+            .children()
+            .find(|n| n.has_tag_name(dav("href")))
+            .and_then(|n| n.text())
+            .ok_or_else(invalid)?;
+        let target = base.join(href).map_err(|_| invalid())?;
+        if target.origin() != base.origin()
+            || target.query().is_some()
+            || target.fragment().is_some()
+        {
+            return Err(invalid());
+        }
+        let kind = row
+            .children()
+            .filter(|n| n.has_tag_name(dav("propstat")))
+            .find_map(|stat| {
+                let status = stat
+                    .children()
+                    .find(|n| n.has_tag_name(dav("status")))?
+                    .text()?;
+                if status.split_whitespace().nth(1) != Some("200") {
+                    return None;
+                }
+                stat.children()
+                    .find(|n| n.has_tag_name(dav("prop")))?
+                    .children()
+                    .find(|n| n.has_tag_name(dav("resourcetype")))
+            })
+            .ok_or_else(invalid)?;
+        if target.path().trim_end_matches('/') == base.path().trim_end_matches('/') {
+            if saw_self || !kind.children().any(|n| n.has_tag_name(dav("collection"))) {
+                return Err(invalid());
+            }
+            saw_self = true;
+        } else {
+            let name = target
+                .path()
+                .trim_end_matches('/')
+                .strip_prefix(base.path())
+                .filter(|s| !s.is_empty() && !s.contains('/'))
+                .ok_or_else(invalid)?;
+            if !names.insert(name.to_owned()) {
+                return Err(invalid());
+            }
+        }
+    }
+    // Nutstore can cap a successful multistatus at 750 rows including self.
+    // Without a continuation guarantee this prototype refuses the entire pass.
+    if !saw_self {
+        return Err(invalid());
+    }
+    if names.len() >= JOURNAL_LIST_LIMIT {
+        return Err(AppError::message(
+            "WebDAV directory listing may be truncated at 750 rows",
+        ));
+    }
+    Ok(names)
 }
 
 fn method(name: &str) -> Result<reqwest::Method, AppError> {

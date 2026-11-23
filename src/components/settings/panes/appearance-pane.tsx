@@ -1,4 +1,4 @@
-import { Check, LoaderCircle, Volume2 } from "lucide-react";
+import { Check, LoaderCircle, RotateCcw, Volume2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { memo, useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -10,6 +10,7 @@ import {
 	SettingsSectionLabel,
 } from "@/components/settings/settings-layout";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
 	Select,
 	SelectContent,
@@ -18,7 +19,13 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useThemePreviews } from "@/hooks/use-theme-previews";
+import { isImeKeyboardEvent } from "@/lib/core/ime";
 import { cn } from "@/lib/core/utils";
 import type {
 	AppSettings,
@@ -26,10 +33,18 @@ import type {
 	ThemePreference,
 } from "@/lib/settings";
 import {
+	clampUiScale,
+	DEFAULT_UI_SCALE,
 	EDITOR_LINE_HEIGHT_MAX,
 	EDITOR_LINE_HEIGHT_MIN,
 	EDITOR_LINE_HEIGHT_STEP,
 	MARKDOWN_MAX_WIDTH_PRESETS,
+	PDF_SCROLL_STRATEGIES,
+	PDF_SPREAD_MODES,
+	PDF_TRANSLATE_TAB_MODES,
+	type PdfScrollStrategy,
+	type PdfSpreadMode,
+	type PdfTranslateTabMode,
 	WIKI_EMBED_FONT_SIZE_MAX,
 	WIKI_EMBED_FONT_SIZE_MIN,
 } from "@/lib/settings";
@@ -50,6 +65,12 @@ export type AppearancePaneProps = {
 	showEditorToolbar: boolean;
 	wikiEmbedFontSize: number;
 	markdownMaxWidth: number;
+	plazaEnabled: boolean;
+	pdfScrollStrategy: PdfScrollStrategy;
+	pdfVimKeys: boolean;
+	pdfSpreadMode: PdfSpreadMode;
+	pdfTranslateTab: PdfTranslateTabMode;
+	vimMode: boolean;
 	patch: (p: Partial<AppSettings>) => void;
 };
 
@@ -67,6 +88,12 @@ function AppearancePaneInner({
 	showEditorToolbar,
 	wikiEmbedFontSize,
 	markdownMaxWidth,
+	plazaEnabled,
+	pdfScrollStrategy,
+	pdfVimKeys,
+	pdfSpreadMode,
+	pdfTranslateTab,
+	vimMode,
 	patch,
 }: AppearancePaneProps) {
 	const { t } = useTranslation("settings");
@@ -119,18 +146,20 @@ function AppearancePaneInner({
 		return () => clearTimeout(id);
 	}, [lineHeight, editorLineHeight, patch]);
 
-	const [scale, setScale] = useState(uiScale);
-	useEffect(() => {
-		setScale(uiScale);
-	}, [uiScale]);
+	const [scaleDraft, setScaleDraft] = useState<string | null>(null);
 
-	useEffect(() => {
-		if (scale === uiScale) return;
-		const id = setTimeout(() => {
-			patch({ uiScale: scale });
-		}, 150);
-		return () => clearTimeout(id);
-	}, [scale, uiScale, patch]);
+	const applyScale = (next: number) => {
+		setScaleDraft(null);
+		if (next !== uiScale) patch({ uiScale: next });
+	};
+
+	const commitScale = (value: string) => {
+		const input = value.trim();
+		const percent = /^-?\d+%?$/.test(input) ? Number.parseInt(input, 10) : NaN;
+		applyScale(
+			Number.isFinite(percent) ? clampUiScale(percent / 100) : uiScale,
+		);
+	};
 
 	const setThemePref = (next: ThemePreference) => {
 		patch({ theme: next });
@@ -195,7 +224,7 @@ function AppearancePaneInner({
 									className={cn(
 										"group h-[7.25rem] min-w-0 rounded-lg border p-1 text-left outline-none",
 										"transition-[border-color,box-shadow,transform,background-color] duration-[var(--motion-duration-micro)] ease-[var(--motion-ease-out)]",
-										"hover:border-primary/55 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50",
+										"hover:border-primary/55 focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring",
 										"active:scale-[0.98]",
 										selected
 											? "border-primary/80 bg-primary/5 ring-1 ring-primary/35"
@@ -278,33 +307,49 @@ function AppearancePaneInner({
 					</Select>
 				</SettingsRow>
 				<SettingsRow label={t("appearance.uiScale.label")} htmlFor={uiScaleId}>
-					<div className="flex items-center gap-2">
-						<input
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon"
+								aria-label={t("appearance.uiScale.reset")}
+								onMouseDown={(event) => {
+									if (scaleDraft !== null) event.preventDefault();
+								}}
+								onClick={() => applyScale(DEFAULT_UI_SCALE)}
+							>
+								<RotateCcw aria-hidden />
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>{t("appearance.uiScale.reset")}</TooltipContent>
+					</Tooltip>
+					<div className="relative w-20">
+						<Input
 							id={uiScaleId}
-							type="range"
-							min={80}
-							max={150}
-							step={1}
-							value={Math.round(scale * 100)}
-							onChange={(e) => setScale(Number(e.target.value) / 100)}
-							aria-valuemin={80}
-							aria-valuemax={150}
-							aria-valuenow={Math.round(scale * 100)}
-							aria-valuetext={t("appearance.uiScale.value", {
-								percent: Math.round(scale * 100),
-							})}
-							className="w-28 accent-primary"
+							type="text"
+							inputMode="numeric"
+							value={scaleDraft ?? String(Math.round(uiScale * 100))}
+							onChange={(event) => setScaleDraft(event.target.value)}
+							onBlur={(event) => commitScale(event.currentTarget.value)}
+							onKeyDown={(event) => {
+								if (event.key !== "Enter" || isImeKeyboardEvent(event)) return;
+								event.preventDefault();
+								event.currentTarget.blur();
+							}}
+							aria-describedby={`${uiScaleId}-unit`}
+							className="pr-7 text-right tabular-nums"
 						/>
-						<span className="w-12 text-right text-muted-foreground text-xs tabular-nums">
-							{t("appearance.uiScale.value", {
-								percent: Math.round(scale * 100),
-							})}
+						<span
+							id={`${uiScaleId}-unit`}
+							className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-muted-foreground text-xs"
+						>
+							%
 						</span>
 					</div>
 				</SettingsRow>
 				<SettingsRow
 					label={t("appearance.sound.label")}
-					description={t("appearance.sound.description")}
 					htmlFor="sound-enabled"
 				>
 					<div className="flex items-center gap-2">
@@ -324,6 +369,16 @@ function AppearancePaneInner({
 							onCheckedChange={(checked) => patch({ soundEnabled: checked })}
 						/>
 					</div>
+				</SettingsRow>
+				<SettingsRow
+					label={t("appearance.plaza.label")}
+					htmlFor="plaza-enabled"
+				>
+					<Switch
+						id="plaza-enabled"
+						checked={plazaEnabled}
+						onCheckedChange={(checked) => patch({ plazaEnabled: checked })}
+					/>
 				</SettingsRow>
 			</SettingsGroup>
 
@@ -479,6 +534,84 @@ function AppearancePaneInner({
 						checked={showEditorToolbar}
 						onCheckedChange={(v) => patch({ showEditorToolbar: v })}
 					/>
+				</SettingsRow>
+			</SettingsGroup>
+
+			<SettingsSectionLabel className="mt-4">
+				{t("appearance.sections.pdf")}
+			</SettingsSectionLabel>
+			<SettingsGroup>
+				<SettingsRow label={t("appearance.pdfScrollStrategy.label")}>
+					<Select
+						value={pdfScrollStrategy}
+						onValueChange={(value) =>
+							patch({ pdfScrollStrategy: value as PdfScrollStrategy })
+						}
+					>
+						<SelectTrigger size="sm" className="min-w-[180px] max-w-[240px]">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{PDF_SCROLL_STRATEGIES.map((strategy) => (
+								<SelectItem key={strategy} value={strategy}>
+									{t(`appearance.pdfScrollStrategy.${strategy}`)}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				</SettingsRow>
+				<SettingsRow
+					label={t("appearance.pdfVimKeys.label")}
+					htmlFor="pdf-vim-keys"
+					description={
+						vimMode ? undefined : t("appearance.pdfVimKeys.requiresVimMode")
+					}
+				>
+					<Switch
+						id="pdf-vim-keys"
+						disabled={!vimMode}
+						checked={pdfVimKeys}
+						onCheckedChange={(checked) => patch({ pdfVimKeys: checked })}
+					/>
+				</SettingsRow>
+				<SettingsRow label={t("appearance.pdfSpreadMode.label")}>
+					<Select
+						disabled={pdfScrollStrategy === "paginated"}
+						value={pdfScrollStrategy === "paginated" ? "none" : pdfSpreadMode}
+						onValueChange={(value) =>
+							patch({ pdfSpreadMode: value as PdfSpreadMode })
+						}
+					>
+						<SelectTrigger size="sm" className="min-w-[180px] max-w-[240px]">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{PDF_SPREAD_MODES.map((mode) => (
+								<SelectItem key={mode} value={mode}>
+									{t(`appearance.pdfSpreadMode.${mode}`)}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				</SettingsRow>
+				<SettingsRow label={t("appearance.pdfTranslateTab.label")}>
+					<Select
+						value={pdfTranslateTab}
+						onValueChange={(value) =>
+							patch({ pdfTranslateTab: value as PdfTranslateTabMode })
+						}
+					>
+						<SelectTrigger size="sm" className="min-w-[180px] max-w-[240px]">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{PDF_TRANSLATE_TAB_MODES.map((mode) => (
+								<SelectItem key={mode} value={mode}>
+									{t(`appearance.pdfTranslateTab.${mode}`)}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
 				</SettingsRow>
 			</SettingsGroup>
 		</>

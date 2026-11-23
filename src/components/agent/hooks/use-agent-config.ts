@@ -17,6 +17,7 @@ import type {
 	AgentPanelRefs,
 	AgentPanelT,
 } from "@/components/agent/hooks/use-agent-panel-context";
+import i18n from "@/i18n";
 import {
 	type AgentEffortChoice,
 	type AgentListResponse,
@@ -24,20 +25,24 @@ import {
 	type AgentModelChoice,
 	type AgentSkill,
 	type CatalogScanResponse,
+	invalidateCatalogScan,
 	listAgentSkills,
 	listAgents,
+	loadCollaborationCatalog,
 	loadCollaborationPref,
 	loadModelCatalog,
 	loadModelFavorites,
 	loadModelPref,
 	loadReasoningEffortPref,
+	markModelPicked,
 	resolveReasoningEffort,
+	saveCollaborationCatalog,
 	saveCollaborationPref,
 	saveModelCatalog,
 	saveModelFavorites,
 	saveModelPref,
 	saveReasoningEffortPref,
-	scanCatalog,
+	scanCatalogCached,
 	warmAgent,
 } from "@/lib/agent";
 import {
@@ -49,6 +54,10 @@ import {
 	mergeModelChoices,
 } from "@/lib/agent/chat-state";
 import type { AcpCommand } from "@/lib/agent/slash-commands";
+import {
+	completeBackgroundTask,
+	startBackgroundTask,
+} from "@/lib/core/background-tasks";
 import { isTauri } from "@/lib/core/tauri";
 import { lifecycle } from "@/lib/lifecycle";
 
@@ -124,7 +133,7 @@ export type AgentConfig = {
 		efforts: AgentEffortChoice[];
 	}) => void;
 	applyFastModeEvent: (ev: { agentId: string; enabled: boolean }) => void;
-	refresh: () => Promise<void>;
+	refresh: (opts?: { forceCatalog?: boolean }) => Promise<void>;
 	selectedModelName: string | null;
 	groupedModels: {
 		id: string;
@@ -223,7 +232,12 @@ export function useAgentConfig({
 	);
 
 	const applyCollaborationEvent = useCallback(
-		(ev: { agentId: string; currentId: string; modes: AgentModeChoice[] }) => {
+		(ev: {
+			agentId: string;
+			configId?: string;
+			currentId: string;
+			modes: AgentModeChoice[];
+		}) => {
 			const cur = selectedAgentIdRef.current;
 			if (cur && cur !== ev.agentId) return;
 			if (!ev.modes.length) {
@@ -242,6 +256,11 @@ export function useAgentConfig({
 					return prevId;
 				}
 				return validPref || current || ev.modes[0]?.id || null;
+			});
+			saveCollaborationCatalog(ev.agentId, {
+				configId: ev.configId ?? "collaboration_mode",
+				currentId: ev.currentId,
+				modes: ev.modes,
 			});
 		},
 		[selectedAgentIdRef],
@@ -277,25 +296,29 @@ export function useAgentConfig({
 		[selectedAgentIdRef],
 	);
 
-	const refresh = useCallback(async () => {
-		if (!isTauri()) return;
-		try {
-			// Scan first: scanCatalog now auto-registers catalog agents that are
-			// on PATH but not yet persisted, so listAgents() returns them without
-			// requiring the user to open Settings first.
-			const scan = await scanCatalog();
-			const [list, discoveredSkills] = await Promise.all([
-				listAgents(),
-				listAgentSkills(vaultPath ?? undefined).catch(() => []),
-			]);
-			setRegistry(list);
-			setCatalog(scan);
-			setSkills(discoveredSkills);
-			setSelectedAgentId((prev) => prev ?? list.defaultId);
-		} catch (e) {
-			setLines((prev) => [...prev, errorChatLine(errorText(e))]);
-		}
-	}, [vaultPath, setLines, setSelectedAgentId]);
+	const refresh = useCallback(
+		async (opts?: { forceCatalog?: boolean }) => {
+			if (!isTauri()) return;
+			try {
+				// Scan first: the catalog scan auto-registers agents that are on PATH
+				// but not yet persisted, so listAgents() returns them without
+				// requiring the user to open Settings first. Mounts reuse the app-start
+				// scan; user-visible waits (CLI login, agent switch) force a fresh one.
+				const scan = await scanCatalogCached({ force: opts?.forceCatalog });
+				const [list, discoveredSkills] = await Promise.all([
+					listAgents(),
+					listAgentSkills(vaultPath ?? undefined).catch(() => []),
+				]);
+				setRegistry(list);
+				setCatalog(scan);
+				setSkills(discoveredSkills);
+				setSelectedAgentId((prev) => prev ?? list.defaultId);
+			} catch (e) {
+				setLines((prev) => [...prev, errorChatLine(errorText(e))]);
+			}
+		},
+		[vaultPath, setLines, setSelectedAgentId],
+	);
 
 	useEffect(() => {
 		void refresh();
@@ -308,6 +331,8 @@ export function useAgentConfig({
 		const off = lifecycle.on("agent:registry-changed", () => {
 			window.clearTimeout(timer);
 			timer = window.setTimeout(() => {
+				// Probes/installs write the registry, so the shared scan is stale.
+				invalidateCatalogScan();
 				void refresh();
 			}, 150);
 		});
@@ -335,8 +360,24 @@ export function useAgentConfig({
 			setUsageBySession({});
 			return;
 		}
-		setCollaborationOptions([]);
-		setCollaborationModeId(loadCollaborationPref(selectedAgentId));
+		const collabCatalog = loadCollaborationCatalog(selectedAgentId);
+		const collabPref = loadCollaborationPref(selectedAgentId);
+		if (collabCatalog?.modes?.length) {
+			setCollaborationOptions(collabCatalog.modes);
+			const validPref =
+				collabPref && collabCatalog.modes.some((mode) => mode.id === collabPref)
+					? collabPref
+					: null;
+			setCollaborationModeId(
+				validPref ||
+					collabCatalog.currentId ||
+					collabCatalog.modes[0]?.id ||
+					null,
+			);
+		} else {
+			setCollaborationOptions([]);
+			setCollaborationModeId(collabPref);
+		}
 		setEffortOptions([]);
 		setReasoningEffort(loadReasoningEffortPref(selectedAgentId));
 		setFastAvailable(false);
@@ -375,6 +416,8 @@ export function useAgentConfig({
 			agentId: string;
 			vaultPath: string | null;
 			modelId?: string;
+			/** Re-apply `modelId` even when ACP reports it as the current model. */
+			forceModel?: boolean;
 			collaborationModeId?: string;
 			generation: number;
 			/** Apply models/usage only when still the intended warm target. */
@@ -392,12 +435,14 @@ export function useAgentConfig({
 					agentId: args.agentId,
 					vaultPath: args.vaultPath ?? undefined,
 					modelId: args.modelId,
+					forceModel: args.forceModel,
 					collaborationModeId: args.collaborationModeId,
 				});
 				if (args.generation !== warmGenRef.current || !args.stillValid()) {
 					return;
 				}
 				if (result.models) applyModelsEvent(result.models);
+				if (result.collaboration) applyCollaborationEvent(result.collaboration);
 				if (
 					result.usageUsed != null &&
 					result.usageSize != null &&
@@ -414,7 +459,7 @@ export function useAgentConfig({
 				}
 			}
 		},
-		[applyModelsEvent],
+		[applyModelsEvent, applyCollaborationEvent],
 	);
 
 	// When Chat opens (or agent/vault changes), warm ACP in the background for models/context.
@@ -423,9 +468,16 @@ export function useAgentConfig({
 		// Supersede any in-flight warm immediately (its results are dropped)…
 		const gen = ++warmGenRef.current;
 		let cancelled = false;
-		// …but debounce the spawn itself: warm_agent cannot be cancelled, so a
-		// rapid agent/vault switch must not start one ACP process per change.
+		// Debounce the spawn: warm_agent cannot be cancelled, so a rapid
+		// agent/vault switch must not start one ACP process per change.
+		// The row is the background-task HUD entry for this warm. It starts
+		// with the spawn, including when the rail is still closed.
 		const timer = setTimeout(() => {
+			const taskId = startBackgroundTask({
+				kind: "agentWarm",
+				title: i18n.t("app:tasks.agentWarm"),
+				icon: "plug",
+			});
 			const agentId = selectedAgentId;
 			const requestVaultPath = vaultPath;
 			void runWarmAgent({
@@ -438,6 +490,8 @@ export function useAgentConfig({
 					!cancelled &&
 					selectedAgentIdRef.current === agentId &&
 					vaultPathRef.current === requestVaultPath,
+			}).finally(() => {
+				completeBackgroundTask(taskId);
 			});
 		}, WARM_SPAWN_DEBOUNCE_MS);
 		return () => {
@@ -512,12 +566,16 @@ export function useAgentConfig({
 	const pickModel = (id: string) => {
 		const next = id.trim();
 		if (!next) return;
-		if (next === modelId) return;
+		// Re-picking the model shown in the UI is still meaningful: the adapter
+		// may report a current model that differs from the one in effect (Claude
+		// ACP's reported current ignores `settings.env.ANTHROPIC_MODEL`), so the
+		// switch must be re-sent instead of deduplicated against the display.
 		// Free-form / third-party ids may not be in the advertised catalog yet.
 		setModels((prev) => ensureModelsInclude(prev, [next]));
 		setModelId(next);
 		if (!selectedAgentId) return;
 		saveModelPref(selectedAgentId, next);
+		markModelPicked(selectedAgentId, next);
 		if (!isTauri() || !agentListenersReady) return;
 
 		const agentId = selectedAgentId;
@@ -531,6 +589,7 @@ export function useAgentConfig({
 			agentId,
 			vaultPath: requestVaultPath,
 			modelId: next,
+			forceModel: true,
 			collaborationModeId:
 				loadCollaborationPref(agentId) ?? collaborationModeId ?? undefined,
 			generation,

@@ -118,13 +118,10 @@
 		"title": "General",
 		"sections": {
 			"papers": "Paper library",
-			"pdf": "PDF reading",
-			"plaza": "Plaza",
 			"system": "System",
 			"network": "Network",
 			"integrations": "Integrations",
-			"mcp": "MCP",
-			"keyboard": "Keyboard"
+			"mcp": "MCP"
 		},
 		"terminalApp": {
 			"label": "Open in Terminal with",
@@ -185,26 +182,6 @@
 			"ask": "Ask",
 			"always": "Always when safe"
 		},
-		"pdfScrollStrategy": {
-			"label": "PDF navigation mode",
-			"vertical": "Vertical",
-			"horizontal": "Horizontal",
-			"paginated": "Page by page"
-		},
-		"pdfVimKeys": {
-			"label": "Enable PDF Vim keys (j/k/h/l)",
-			"requiresVimMode": "Requires Vim mode"
-		},
-		"vimMode": {
-			"label": "Vim mode",
-			"description": "Enable j/k/h/l navigation and F jump labels in the file tree, dropdown lists and the PDF reader. Off keeps plain typing and arrow keys."
-		},
-		"pdfSpreadMode": {
-			"label": "PDF page layout",
-			"none": "Single page",
-			"odd": "Two-page (from page 1)",
-			"even": "Two-page (cover separate)"
-		},
 		"batchImportConcurrency": {
 			"label": "Background task concurrency",
 			"value": "{{value}} simultaneous"
@@ -231,6 +208,10 @@
 			"probeOk": "Available",
 			"probeFail": "Unavailable",
 			"probeProbing": "Testing…",
+			"probeScope": {
+				"campusPage": "Campus page access verified",
+				"pdf": "Publisher PDF access verified ({{bytes}} bytes, {{kind}})"
+			},
 			"presetsLabel": "Common institutions",
 			"presets": {
 				"zju": "Zhejiang University",
@@ -239,8 +220,37 @@
 				"neu": "Northeastern University",
 				"tsinghua": "Tsinghua University",
 				"fudan": "Fudan University",
-				"bjmu": "Peking University Health Science Center"
+				"bjmu": "Peking University Health Science Center",
+				"pku": "Peking University"
 			}
+		},
+		"openreviewAuth": {
+			"label": "OpenReview",
+			"login": "Sign in",
+			"loggingIn": "Waiting…",
+			"statusIdle": "Not signed in",
+			"statusWaiting": "Waiting for sign-in…",
+			"statusOk": "Browser verified",
+			"statusSignedIn": "Signed in",
+			"statusSessionExpired": "Sign-in expired",
+			"statusExpired": "Verification expired",
+			"loginFailed": "OpenReview sign-in failed"
+		},
+		"alphaxiv": {
+			"label": "AlphaXiv",
+			"keyLabel": "API key",
+			"placeholder": "Paste an AlphaXiv API key",
+			"test": "Test connection",
+			"testing": "Testing…",
+			"disconnect": "Disconnect",
+			"disconnecting": "Disconnecting…",
+			"statusIdle": "Not connected",
+			"statusOk": "Connected",
+			"statusFail": "Could not connect",
+			"statusProbing": "Testing…",
+			"testFailed": "AlphaXiv connection failed",
+			"clearFailed": "Could not disconnect AlphaXiv",
+			"openKeyPage": "Get a key"
 		},
 		"easyScholar": {
 			"section": "EasyScholar",
@@ -251,10 +261,23 @@
 			"probeIdle": "Not configured",
 			"probeOk": "Available",
 			"probeFail": "Unavailable",
-			"probeProbing": "Checking…"
-		},
-		"plaza": {
-			"label": "Plaza"
+			"probeProbing": "Checking…",
+			"ranksLabel": "Rank tags",
+			"ranksPlaceholder": "Select rank tags to show",
+			"ranksReset": "Reset",
+			"rankNames": {
+				"if": "IF",
+				"if5": "IF5",
+				"jci": "JCI",
+				"sci": "SCI",
+				"ssci": "SSCI",
+				"eii": "EI",
+				"cssci": "CSSCI",
+				"pku": "PKU Core",
+				"ccf": "CCF",
+				"fms": "FMS",
+				"utd24": "UTD24"
+			}
 		},
 		"connector": {
 			"label": "Zotero Connector compatibility",
@@ -267,8 +290,10 @@
 			"serverStopped": "The Connector service stopped. Agentero retries every 5 seconds. You can also retry now."
 		},
 		"mcp": {
+			"allowWrite": "Allow clients to modify the Vault",
+			"allowOnline": "Allow online tools",
 			"exposeText": {
-				"label": "Expose paper text (MCP)"
+				"label": "Allow clients to read full papers"
 			},
 			"label": "MCP server",
 			"portLabel": "MCP port",
@@ -304,13 +329,6 @@
 				"action": "Clear",
 				"done": "Activity history cleared"
 			}
-		},
-		"pdfTranslateTab": {
-			"label": "Page translate button",
-			"description": "Fixed screen size on the page corner. Hidden still leaves the PDF toolbar and the translate shortcut.",
-			"hover": "Show on hover",
-			"always": "Always show",
-			"hidden": "Hidden"
 		}
 	},
 	"appearance": {
@@ -334,12 +352,39 @@
 		},
 		"uiScale": {
 			"label": "Interface scale",
-			"value": "{{percent}}%"
+			"reset": "Restore default scale"
 		},
 		"sound": {
 			"label": "In-app sounds",
-			"description": "Quiet cues when an Agent needs you, or a turn or PDF translation finishes or fails",
 			"preview": "Preview"
+		},
+		"sections": {
+			"pdf": "PDF reading"
+		},
+		"plaza": {
+			"label": "Plaza"
+		},
+		"pdfScrollStrategy": {
+			"label": "PDF navigation mode",
+			"vertical": "Vertical",
+			"horizontal": "Horizontal",
+			"paginated": "Page by page"
+		},
+		"pdfVimKeys": {
+			"label": "Enable PDF Vim keys (j/k/h/l)",
+			"requiresVimMode": "Requires Vim mode"
+		},
+		"pdfSpreadMode": {
+			"label": "PDF page layout",
+			"none": "Single page",
+			"odd": "Two-page (from page 1)",
+			"even": "Two-page (cover separate)"
+		},
+		"pdfTranslateTab": {
+			"label": "PDF top-left translate-page button",
+			"hover": "Show on hover",
+			"always": "Always show",
+			"hidden": "Hidden"
 		},
 		"fonts": {
 			"section": "Fonts",
@@ -459,7 +504,9 @@
 			"qwenwork": "QwenWork",
 			"workbuddy": "WorkBuddy",
 			"dsh-desktop": "Dsh Desktop",
-			"bundledCli": "Bundled CLI — connectable"
+			"bundledCli": "Bundled CLI — connectable",
+			"unsupported": "No Linux version",
+			"unsupportedHint": "Dsh Desktop is not available on Linux — install the dsh CLI with `npm i -g @deepseek-ai/dsh` to use it as an Agent."
 		},
 		"zcodeDesktopPathHint": "If ZCode is not found, set ZCODE_BIN to its zcode.cjs path. This supports any drive and nested install folder.",
 		"defaultAgent": {
@@ -559,6 +606,7 @@
 			}
 		},
 		"form": {
+			"supportsShell": "Can run local shell commands",
 			"defaultName": "Desktop",
 			"name": "Name",
 			"command": "Command",
@@ -609,7 +657,11 @@
 		"errors": {
 			"noBuiltinKey": "Built-in translation is not available in this build.",
 			"unreachable": "Could not reach the translation service. Check the network or pick another service in Translate settings.",
-			"terminology": "This service could not preserve the terminology. Choose another translation service and retry."
+			"timeout": "Translation timed out because the service stopped sending output. Retry this block.",
+			"incomplete": "The translation was cut off before it finished. Retry this block.",
+			"upstream": "The translation service returned an error: {{detail}}",
+			"terminology": "This service could not preserve the terminology. Choose another translation service and retry.",
+			"indexPromptEcho": "The translation included the prompt. The original text was kept for that passage."
 		},
 		"targetLang": {
 			"label": "Target language",
@@ -1017,6 +1069,7 @@
 	},
 	"keyboard": {
 		"title": "Keyboard",
+		"vimMode": "Vim mode",
 		"edit": "Change shortcut for {{command}}",
 		"clear": "Unbind {{command}}",
 		"clearHint": "Unbind this shortcut",
@@ -1068,6 +1121,13 @@
 			"check": "Check for updates",
 			"downloadInstall": "Install and restart",
 			"releaseNotes": "Release notes",
+			"history": "Update history",
+			"selectVersion": "Select version",
+			"currentVersion": "Current version",
+			"fullReleaseNotes": "Full release notes on GitHub",
+			"loadingNotes": "Loading release notes…",
+			"noSummary": "No in-app summary for this version.",
+			"refreshNotesFailed": "Couldn't refresh update history.",
 			"tagNew": "New version",
 			"tagUpdating": "Updating…",
 			"tagDownloading": "Updating {{progress}}%",
@@ -1134,6 +1194,16 @@
 		"backendS3": "Object storage",
 		"backendWebdav": "WebDAV",
 		"backendGit": "Git",
+		"mirrors": "Mirrors",
+		"mirrorsHint": "Read-only copies published after each sync. Agentero never reads changes back from a mirror, so a mirror cannot resurrect or delete local files.",
+		"mirrorAdd": "Add mirror",
+		"mirrorRemove": "Remove mirror",
+		"mirrorBackend": "Mirror backend",
+		"mirrorReadOnly": "read-only",
+		"mirrorNeverPublished": "Not published yet",
+		"mirrorLastPublished": "Last published {{time}}",
+		"mirrorError": "Last publish failed",
+		"mirrorPublishing": "Publishing…",
 		"backendLocked": "Disconnect before switching the storage backend.",
 		"serverUrl": "Server URL",
 		"username": "Username",
@@ -1156,7 +1226,20 @@
 		"gitSslCaHint": "Absolute PEM path for a self-signed HTTPS server. Empty uses the system trust store.",
 		"gitAuthFailed": "Git could not sign in, and sync does not prompt.\n{{detail}}\nHTTPS: store a token first with `git credential approve` or your credential helper. SSH: run `ssh-add`.",
 		"gitTlsFailed": "Git rejected the server certificate.\n{{detail}}\nFor a self-signed server, set the CA certificate path and connect again.",
-		"noConditionalWrites": "Sync is blocked because this storage does not enforce conditional writes. Choose another store to avoid overwriting another device’s changes.",
+		"noConditionalWrites": "Standard sync is blocked without conditional writes. WebDAV can enable lock-guarded degraded sync below, or use a journal configured through the CLI.",
+		"noConditionalWritesShort": "Server ignores conditional writes; you can enable degraded sync",
+		"dismissNotice": "Dismiss notice",
+		"allowDegradedSync": "Allow degraded sync",
+		"degradedSyncRisk": "Publishes under a lock instead of atomic writes. Conflict copies may appear and deleted files can resurface. Enable on every device sharing this store, then save.",
+		"overwritePull": "Remote overwrites local",
+		"overwritePush": "Local overwrites remote",
+		"overwritePullTitle": "Overwrite local with remote?",
+		"overwritePushTitle": "Overwrite remote with local?",
+		"overwritePullBody": "Deletes {{delete}} local-only file(s) and restores {{download}} file(s) to the remote version (remote v{{version}}). Discarded local content cannot be recovered.",
+		"overwritePushBody": "Uploads {{upload}} object(s) and drops {{remove}} remote-only file(s) from the manifest (remote v{{version}}). Other devices see these deletions on their next sync; superseded manifests stay on the store.",
+		"overwriteConfirm": "Overwrite",
+		"overwriteDone": "Overwrite complete: v{{version}}, {{up}} uploaded, {{down}} downloaded, {{deleted}} local deleted",
+		"cancel": "Cancel",
 		"saved": "Sync configured",
 		"disconnect": "Disconnect",
 		"syncNow": "Sync now",

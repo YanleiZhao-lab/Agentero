@@ -909,7 +909,10 @@ export async function confirmRenamePath(
 	nextName: string,
 ): Promise<void> {
 	const vaultPath = getVaultPath();
-	if (!vaultPath) return;
+	if (!vaultPath) {
+		setRenameDraft(null);
+		return;
+	}
 	const trimmed = nextName.trim();
 	if (!isValidVaultEntryName(trimmed)) {
 		notifyError(i18n.t("sidebar:fileTree.invalidName"));
@@ -969,6 +972,11 @@ export async function confirmRenamePath(
 			}),
 		);
 	} catch (error) {
+		// Drop the draft before anything else: leaving it set keeps the inline
+		// editor mounted and blocks every selection, context menu and drop
+		// handler, so the tree never recovers. Restore the row instead and let
+		// the toast explain the failure.
+		setRenameDraft(null);
 		if (createdFolder && folderAbs) {
 			// Do not leave an empty folder behind when the move is rejected.
 			try {
@@ -979,11 +987,17 @@ export async function confirmRenamePath(
 			}
 		}
 		trackInternalRenamePaths(pendingEventPaths, Date.now() + 2000);
+		// The row stays in edit mode until this clears, and selection, context
+		// menus, and drag all refuse to run while a rename draft exists.
+		setRenameDraft(null);
 		notifyError(
 			error instanceof Error
 				? error.message
 				: i18n.t("sidebar:fileTree.renameFailed"),
 		);
+		// The rename field locks itself before this returns. Reject so it can
+		// accept Escape again if it is still mounted.
+		throw error;
 	} finally {
 		setVaultBusy(false);
 	}
@@ -1101,6 +1115,26 @@ export function cancelCreate(): void {
 	setCreateDraft(null);
 }
 
+export async function createVaultFolder(
+	vaultPath: string,
+	parentPath: string,
+	name: string,
+): Promise<string> {
+	const trimmed = name.trim();
+	if (!isValidVaultEntryName(trimmed)) {
+		throw new Error(i18n.t("sidebar:fileTree.invalidName"));
+	}
+	const path = joinVaultPath(parentPath, trimmed);
+	if (await vaultPathExists(path)) {
+		throw new Error(
+			i18n.t("sidebar:fileTree.alreadyExists", { name: trimmed }),
+		);
+	}
+	await createVaultDirectory(path);
+	await refreshTree(vaultPath);
+	return path;
+}
+
 export async function confirmCreate(name: string): Promise<void> {
 	const { createDraft } = vaultStore.getState();
 	const vaultPath = getVaultPath();
@@ -1124,27 +1158,30 @@ export async function confirmCreate(name: string): Promise<void> {
 			await writeExperimentPair(vaultPath, createDraft.parentPath, trimmed);
 			return;
 		}
+		if (kind === "folder") {
+			const path = await createVaultFolder(
+				vaultPath,
+				createDraft.parentPath,
+				trimmed,
+			);
+			setTreeSelectedPath(path);
+			return;
+		}
 		// Use vault-aware exists: local FS plugin cannot see `remote:<id>/…`.
 		if (await vaultPathExists(full)) {
 			notifyError(i18n.t("sidebar:fileTree.alreadyExists", { name: trimmed }));
 			return;
 		}
-		if (kind !== "folder") {
-			const { createResearchTable, isResearchTablePath, researchTableStem } =
-				await import("@/lib/research-table/model");
-			const table = isResearchTablePath(trimmed)
-				? createResearchTable(researchTableStem(trimmed))
-				: null;
-			if (table) table.fields[0].name = i18n.t("editor:researchTable.name");
-			const initialContent = table ? `${JSON.stringify(table, null, 2)}\n` : "";
-			await writeVaultFile(full, initialContent);
-			await refreshTree(vaultPath);
-			openPath(full);
-		} else {
-			await createVaultDirectory(full);
-			await refreshTree(vaultPath);
-			setTreeSelectedPath(full);
-		}
+		const { createResearchTable, isResearchTablePath, researchTableStem } =
+			await import("@/lib/research-table/model");
+		const table = isResearchTablePath(trimmed)
+			? createResearchTable(researchTableStem(trimmed))
+			: null;
+		if (table) table.fields[0].name = i18n.t("editor:researchTable.name");
+		const initialContent = table ? `${JSON.stringify(table, null, 2)}\n` : "";
+		await writeVaultFile(full, initialContent);
+		await refreshTree(vaultPath);
+		openPath(full);
 	} catch (e) {
 		notifyError(errorText(e));
 	} finally {

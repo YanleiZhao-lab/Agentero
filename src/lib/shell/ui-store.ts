@@ -60,6 +60,8 @@ type UiStore = {
 	lookupOpenSignal: number;
 	/** Zotero one-click migration dialog. */
 	zoteroOpen: boolean;
+	/** AlphaXiv library import dialog. */
+	alphaxivOpen: boolean;
 	/** Zotero bidirectional sync dialog. */
 	zoteroSyncOpen: boolean;
 	commandOpen: boolean;
@@ -87,6 +89,7 @@ export const uiStore = createStore<UiStore>(() => ({
 	featurePoppedOut: {},
 	lookupOpenSignal: 0,
 	zoteroOpen: false,
+	alphaxivOpen: false,
 	zoteroSyncOpen: false,
 	commandOpen: false,
 	commandMode: "go",
@@ -197,6 +200,10 @@ export function setZoteroOpen(open: boolean): void {
 	uiStore.setState({ zoteroOpen: open });
 }
 
+export function setAlphaXivOpen(open: boolean): void {
+	uiStore.setState({ alphaxivOpen: open });
+}
+
 export function setZoteroSyncOpen(open: boolean): void {
 	uiStore.setState({ zoteroSyncOpen: open });
 }
@@ -305,12 +312,13 @@ export function toggleSidebar(): void {
 }
 
 /**
- * Expand the right rail on `tab` (main window only). Callers must have already
- * ruled out an open singleton feature window for this tab.
+ * Expand the right rail on `tab` (main window only). The heavy Agent panel
+ * mounts on a later frame from the rail view, so this call does not wait on
+ * it. Callers that already know a singleton feature window is open must not
+ * use this.
  */
 export function openRightTabInRail(tab: RightSidebarTab): void {
 	setRightSidebarTab(tab);
-	if (tab === "agent") setAgentPanelMounted(true);
 	if (!uiStore.getState().rightSidebarOpen) {
 		layout()?.setRightCollapsed(false, { focusAgent: tab === "agent" });
 	}
@@ -340,6 +348,7 @@ export function clearUiVaultState(): void {
 		paperSearchDraft: null,
 		hoveredPaperPath: null,
 		zoteroOpen: false,
+		alphaxivOpen: false,
 		zoteroSyncOpen: false,
 		commandOpen: false,
 	});

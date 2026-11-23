@@ -172,6 +172,7 @@ impl AgentRegistry {
         });
 
         let descriptor = AgentDescriptor {
+            supports_shell: req.supports_shell,
             id: id.clone(),
             name: req.name.trim().to_string(),
             template,
@@ -251,6 +252,7 @@ impl AgentRegistry {
                 }
 
                 let agent = self.upsert(UpsertAgentRequest {
+                    supports_shell: false,
                     id: Some(existing.id.clone()),
                     name: info.name,
                     template: Some(template_from_id(template_id)),
@@ -264,6 +266,7 @@ impl AgentRegistry {
         }
 
         let agent = self.upsert(UpsertAgentRequest {
+            supports_shell: false,
             id: Some(format!("catalog-{template_id}")),
             name: info.name,
             template: Some(template_from_id(template_id)),
@@ -393,12 +396,17 @@ impl AgentRegistry {
                     crate::features::agent::registry::discovery::login_shell_env().as_deref(),
                     &descriptor_env,
                 );
-                let path_acp_available = resolve_acp_entry(&info.command, &environment).is_some();
+                let path_acp_entry = resolve_acp_entry(&info.command, &environment);
+                let path_acp_available = path_acp_entry.is_some();
                 let bundled = bundled::bundled_adapter(&info.id);
                 let detect_path = if info.id == AgentTemplate::Zcode.as_str() {
                     zcode_host_path(&environment)
                 } else if !path_acp_available && bundled.is_some() {
                     bundled::host_path(&info.id, &environment)
+                } else if info.detect_command.is_none() {
+                    // The detect command *is* the ACP entry; reuse the lookup
+                    // instead of walking PATH again for the same binary.
+                    path_acp_entry.clone()
                 } else {
                     let detect = info
                         .detect_command
@@ -407,10 +415,13 @@ impl AgentRegistry {
                     resolve_acp_entry(detect, &environment)
                 };
                 let binary_available = detect_path.is_some();
-                let availability =
-                    local_command_availability(&info.command, &info.id, &environment, || {
-                        bundled::bundled_spawn(&info.id, &environment).is_some()
-                    });
+                let availability = local_command_availability(
+                    &info.command,
+                    &info.id,
+                    &environment,
+                    Some(path_acp_available),
+                    || bundled::bundled_spawn(&info.id, &environment).is_some(),
+                );
                 let acp_command_available = availability.is_ok();
 
                 let (acp_status, acp_agent_name, last_probe_error, last_probed_at) =
@@ -625,6 +636,7 @@ fn migrate_catalog_env_defaults(state: &mut AgentRegistryState) -> bool {
 /// 内置「知乎」Agent 的 descriptor：Host 内建，无外部命令，始终可用。
 fn builtin_agent_descriptor() -> AgentDescriptor {
     AgentDescriptor {
+        supports_shell: false,
         id: ZHIHU_AGENT_ID.to_string(),
         name: "知乎".to_string(),
         template: AgentTemplate::Zhihu,
@@ -1031,6 +1043,9 @@ fn local_command_availability(
     command: &str,
     template_id: &str,
     environment: &HashMap<String, String>,
+    // Callers that already resolved the ACP entry hand the answer over so a
+    // scan does not walk PATH for the same binary twice.
+    path_available: Option<bool>,
     bundled_spawnable: impl FnOnce() -> bool,
 ) -> Result<(), String> {
     // ZCode's ACP executable is only a bridge. Treat it as unavailable until
@@ -1040,7 +1055,9 @@ fn local_command_availability(
     if template_id == AgentTemplate::Zcode.as_str() && zcode_host_path(environment).is_none() {
         return Err("ZCode desktop CLI not found (install ZCode or set ZCODE_BIN)".to_string());
     }
-    if resolve_acp_entry(command, environment).is_some() {
+    let path_available =
+        path_available.unwrap_or_else(|| resolve_acp_entry(command, environment).is_some());
+    if path_available {
         return Ok(());
     }
     if bundled_spawnable() && bundled::host_requirement(template_id).is_some() {
@@ -1061,6 +1078,7 @@ fn probe_or_bundled(agent: &mut AgentDescriptor) {
         &agent.command,
         agent.template.as_str(),
         &environment,
+        None,
         || bundled::bundled_spawn(agent.template.as_str(), &environment).is_some(),
     );
     agent.available = availability.is_ok();
@@ -1104,6 +1122,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("CODEX_PATH".to_string(), "/usr/local/bin/codex".to_string());
         AgentDescriptor {
+            supports_shell: false,
             id: "catalog-codex-acp".to_string(),
             name: "Codex".to_string(),
             template: AgentTemplate::CodexAcp,
@@ -1138,6 +1157,7 @@ mod tests {
     fn migrates_legacy_grok_npx_launcher_to_native_cli() {
         let mut state = AgentRegistryState {
             agents: vec![AgentDescriptor {
+                supports_shell: false,
                 id: "catalog-grok-build".to_string(),
                 name: "Grok Build".to_string(),
                 template: AgentTemplate::GrokBuild,
@@ -1173,6 +1193,7 @@ mod tests {
     fn migrates_legacy_zcode_bare_launcher_to_acp_server() {
         let mut state = AgentRegistryState {
             agents: vec![AgentDescriptor {
+                supports_shell: false,
                 id: "catalog-zcode".to_string(),
                 name: "ZCode".to_string(),
                 template: AgentTemplate::Zcode,
@@ -1296,6 +1317,7 @@ mod tests {
     #[test]
     fn apply_user_agent_sets_env_for_codex() {
         let mut agent = AgentDescriptor {
+            supports_shell: false,
             id: "c".into(),
             name: "Codex".into(),
             template: AgentTemplate::CodexAcp,
@@ -1328,6 +1350,7 @@ mod tests {
     #[test]
     fn proxy_injection_adds_loopback_no_proxy() {
         let mut agent = AgentDescriptor {
+            supports_shell: false,
             id: "oc".into(),
             name: "OpenCode".into(),
             template: AgentTemplate::Opencode,
@@ -1368,6 +1391,7 @@ mod tests {
     #[test]
     fn proxy_disabled_clears_injected_vars_but_keeps_user_no_proxy() {
         let mut agent = AgentDescriptor {
+            supports_shell: false,
             id: "oc2".into(),
             name: "OpenCode".into(),
             template: AgentTemplate::Opencode,
@@ -1417,7 +1441,8 @@ mod tests {
             ("codex-acp", "codex-acp"),
         ] {
             let (host, key) = super::bundled::host_requirement(id).unwrap();
-            let error = local_command_availability(command, id, &environment, || true).unwrap_err();
+            let error =
+                local_command_availability(command, id, &environment, None, || true).unwrap_err();
             assert!(error.contains(host));
             assert!(error.contains(key));
 
@@ -1433,10 +1458,12 @@ mod tests {
                 std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
                     .unwrap();
             }
-            assert!(local_command_availability(command, id, &environment, || {
-                panic!("PATH adapter must bypass the bundled tier")
-            })
-            .is_ok());
+            assert!(
+                local_command_availability(command, id, &environment, None, || {
+                    panic!("PATH adapter must bypass the bundled tier")
+                })
+                .is_ok()
+            );
 
             let host_entry = if cfg!(windows) && id == "claude-acp" {
                 let script = tmp.path().join("cli.js");
@@ -1447,10 +1474,12 @@ mod tests {
             };
             environment.insert(key.to_string(), host_entry.display().to_string());
             assert!(
-                local_command_availability("missing-adapter", id, &environment, || true).is_ok()
+                local_command_availability("missing-adapter", id, &environment, None, || true)
+                    .is_ok()
             );
             assert!(
-                local_command_availability("missing-adapter", id, &environment, || false).is_err()
+                local_command_availability("missing-adapter", id, &environment, None, || false)
+                    .is_err()
             );
         }
     }
@@ -1463,6 +1492,7 @@ mod tests {
 
         fn desc(name: &str, template: AgentTemplate) -> AgentDescriptor {
             AgentDescriptor {
+                supports_shell: false,
                 id: name.to_string(),
                 name: name.to_string(),
                 template,
@@ -1499,6 +1529,7 @@ mod tests {
     #[test]
     fn apply_user_agent_sets_anthropic_headers_for_claude() {
         let mut agent = AgentDescriptor {
+            supports_shell: false,
             id: "cc".into(),
             name: "Claude".into(),
             template: AgentTemplate::ClaudeAcp,

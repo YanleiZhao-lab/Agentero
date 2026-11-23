@@ -1,11 +1,12 @@
 /**
  * Vault cloud sync (S3-compatible / WebDAV) — Host command wrappers.
- * Design: docs/backend/sync.md
+ * Host implementation: `src-tauri/src/integration/sync/commands.rs`.
  */
 
 import {
 	commands,
 	type SyncBackendConfig as SyncBackendConfigWire,
+	type SyncMirrorEvent_Deserialize,
 	type SyncStateEvent_Deserialize,
 	type SyncStatus_Serialize,
 } from "@/lib/core/bindings";
@@ -59,8 +60,18 @@ export type SyncBackendConfig = {
 	intervalMinutes: number;
 	/** Detected on connect: false when the backend rejects conditional PUTs. */
 	conditionalWrites: boolean;
+	/** Per-device opt-in to the degraded protocol (WebDAV stores that ignore
+	 * conditional writes). Off by default; every device must enable it. */
+	allowDegradedSync: boolean;
 	/** Sync scope for bulky paper assets (default: everything). */
 	scope: SyncScope;
+};
+
+export type SyncMirrorStatus = {
+	config: SyncBackendConfig;
+	lastSyncAt?: string;
+	lastVersion: number;
+	lastError?: string;
 };
 
 export type SyncStatus = {
@@ -69,6 +80,8 @@ export type SyncStatus = {
 	running: boolean;
 	lastSyncAt?: string;
 	lastVersion: number;
+	/** Read-only mirrors in configuration order. */
+	mirrors: SyncMirrorStatus[];
 };
 
 export type SyncOutcome = {
@@ -82,6 +95,15 @@ export type SyncOutcome = {
 
 /** `sync:state` payload comes straight from the generated wire contract. */
 export type SyncStateEvent = SyncStateEvent_Deserialize;
+
+/** `sync:mirror` payload: one event per mirror pass (started → published | error). */
+export type SyncMirrorEvent = SyncMirrorEvent_Deserialize;
+
+export type SyncMirrorPhase = "started" | "published" | "error";
+
+export function isSyncMirrorPhase(value: string): value is SyncMirrorPhase {
+	return value === "started" || value === "published" || value === "error";
+}
 
 /** `sync:progress` phases; the wire payload types `phase` as a plain string. */
 export type SyncPhase = "scan" | "pull" | "download" | "upload" | "finalize";
@@ -129,6 +151,7 @@ export const emptySyncConfig = (
 	autoSync: true,
 	intervalMinutes: 30,
 	conditionalWrites: true,
+	allowDegradedSync: false,
 	scope: { pdf: true, source: true, attachments: true },
 });
 
@@ -151,6 +174,12 @@ function statusFromWire(status: SyncStatus_Serialize): SyncStatus {
 		running: status.running,
 		lastSyncAt: status.lastSyncAt ?? undefined,
 		lastVersion: status.lastVersion,
+		mirrors: (status.mirrors ?? []).map((mirror) => ({
+			config: configFromWire(mirror.config),
+			lastSyncAt: mirror.lastSyncAt ?? undefined,
+			lastVersion: mirror.lastVersion,
+			lastError: mirror.lastError ?? undefined,
+		})),
 	};
 }
 
@@ -178,6 +207,7 @@ function configFromWire(config: SyncBackendConfigWire): SyncBackendConfig {
 		autoSync: config.autoSync ?? true,
 		intervalMinutes: config.intervalMinutes ?? 30,
 		conditionalWrites: config.conditionalWrites ?? true,
+		allowDegradedSync: config.allowDegradedSync ?? false,
 		scope: {
 			pdf: config.scope?.pdf ?? true,
 			source: config.scope?.source ?? true,
@@ -199,9 +229,12 @@ export function syncScopeSizes(vaultPath: string): Promise<SyncScopeSizes> {
 export async function syncConfigure(
 	vaultPath: string,
 	config: SyncBackendConfig,
+	mirrors: SyncBackendConfig[] = [],
 ): Promise<SyncStatus> {
 	return statusFromWire(
-		await callApiResult(() => commands.syncConfigure({ vaultPath, config })),
+		await callApiResult(() =>
+			commands.syncConfigure({ vaultPath, config, mirrors }),
+		),
 	);
 }
 
@@ -211,6 +244,35 @@ export async function syncDisconnect(vaultPath: string): Promise<void> {
 
 export function syncNow(vaultPath: string): Promise<SyncOutcome> {
 	return callApiResult(() => commands.syncNow({ vaultPath }));
+}
+
+/** Which side wins a manual overwrite. */
+export type SyncOverwriteDirection = "remoteToLocal" | "localToRemote";
+
+/** Impact preview for the overwrite confirmation dialog (read-only). */
+export type SyncOverwritePreview = {
+	willDeleteLocal: number;
+	willDownload: number;
+	willRemoveRemote: number;
+	willUpload: number;
+	remoteVersion: number;
+};
+
+export function syncOverwritePreview(
+	vaultPath: string,
+	direction: SyncOverwriteDirection,
+): Promise<SyncOverwritePreview> {
+	return callApiResult(() =>
+		commands.syncOverwritePreview({ vaultPath, direction }),
+	);
+}
+
+/** Destructive manual overwrite; the UI confirms with a preview first. */
+export function syncOverwrite(
+	vaultPath: string,
+	direction: SyncOverwriteDirection,
+): Promise<SyncOutcome> {
+	return callApiResult(() => commands.syncOverwrite({ vaultPath, direction }));
 }
 
 export type SyncCloudUsage = {

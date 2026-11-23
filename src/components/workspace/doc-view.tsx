@@ -3,7 +3,7 @@ import { lazy, memo, Suspense, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { PapersLibrary } from "@/components/library/papers-library";
 import { PlazaTabView } from "@/components/plaza/plaza-tab-view";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import type { PdfViewerHandle } from "@/components/viewer";
 import { HtmlViewer, ImageViewer } from "@/components/viewer";
 import { LocalHtmlViewer } from "@/components/viewer/local-html-viewer";
@@ -84,6 +84,7 @@ export type DocViewLibraryProps = {
 	onQueryChange: (query: string) => void;
 	/** Vault-relative folder scope; null = full library. */
 	scopePath: string | null;
+	onNavigateFolder?: (path: string | null) => void;
 	columns: LibraryColumnPref[];
 	onColumnsChange: (columns: LibraryColumnPref[]) => void;
 	rescanning: boolean;
@@ -174,23 +175,69 @@ export type DocViewProps = {
 	trashReloadSignal?: number;
 };
 
-function TabLoadingSkeleton() {
+type TabSkeletonShape = "article" | "page" | "table";
+
+function tabSkeletonShape(tab: DocTab): TabSkeletonShape {
+	if (
+		tab.kind === "library" ||
+		tab.kind === "trash" ||
+		tab.mode === "research-table"
+	) {
+		return "table";
+	}
+	if (
+		tab.mode === "pdf" ||
+		tab.mode === "translation" ||
+		tab.texLive ||
+		tab.texCompiling
+	) {
+		return "page";
+	}
+	return "article";
+}
+
+function TabLoadingSkeleton({
+	shape = "article",
+}: {
+	shape?: TabSkeletonShape;
+}) {
+	if (shape === "page") {
+		return <PageSkeleton className="bg-muted/20" />;
+	}
+	if (shape === "table") {
+		return (
+			<div
+				className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden bg-background p-3"
+				aria-busy="true"
+				role="status"
+			>
+				<Skeleton className="h-8 w-full" />
+				{["one", "two", "three", "four", "five", "six"].map((key) => (
+					<div key={key} className="flex h-10 items-center gap-4 px-2">
+						<Skeleton className="h-3 w-1/2" />
+						<Skeleton className="h-3 w-16" />
+						<Skeleton className="h-3 w-12" />
+					</div>
+				))}
+			</div>
+		);
+	}
 	return (
 		<div
 			className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden bg-muted/20 p-4"
 			aria-busy="true"
 			role="status"
 		>
-			<Skeleton className="library-shimmer h-8 w-2/5" />
+			<Skeleton className="h-8 w-2/5" />
 			<div className="flex min-h-0 flex-1 flex-col gap-3 rounded-md border bg-background/40 p-4">
-				<Skeleton className="library-shimmer h-4 w-3/4" />
-				<Skeleton className="library-shimmer h-3 w-full" />
-				<Skeleton className="library-shimmer h-3 w-11/12" />
-				<Skeleton className="library-shimmer h-3 w-4/5" />
+				<Skeleton className="h-4 w-3/4" />
+				<Skeleton className="h-3 w-full" />
+				<Skeleton className="h-3 w-11/12" />
+				<Skeleton className="h-3 w-4/5" />
 				<div className="mt-4 space-y-3">
-					<Skeleton className="library-shimmer h-3 w-full" />
-					<Skeleton className="library-shimmer h-3 w-5/6" />
-					<Skeleton className="library-shimmer h-3 w-2/3" />
+					<Skeleton className="h-3 w-full" />
+					<Skeleton className="h-3 w-5/6" />
+					<Skeleton className="h-3 w-2/3" />
 				</div>
 			</div>
 		</div>
@@ -204,13 +251,14 @@ function TabLoadingSkeleton() {
 function TexCompilingPlaceholder() {
 	const { t } = useTranslation("app");
 	return (
-		<div
-			className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6"
-			aria-busy="true"
-			role="status"
-		>
-			<Skeleton className="library-shimmer h-3.5 w-28" />
-			<p className="text-muted-foreground text-xs">{t("tabs.texCompiling")}</p>
+		<div className="relative min-h-0 flex-1">
+			<PageSkeleton label={t("tabs.texCompiling")} className="bg-muted/20" />
+			<p
+				aria-hidden="true"
+				className="pointer-events-none absolute inset-x-0 bottom-8 text-center text-muted-foreground text-xs"
+			>
+				{t("tabs.texCompiling")}
+			</p>
 		</div>
 	);
 }
@@ -328,7 +376,9 @@ const DocumentContent = memo(function DocumentContent({
 		const texRoot = tab.texRoot ?? tab.path.replace(/\.pdf$/i, ".tex");
 		return (
 			<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-				<Suspense fallback={<TabLoadingSkeleton />}>
+				<Suspense
+					fallback={<TabLoadingSkeleton shape={tabSkeletonShape(tab)} />}
+				>
 					<TexLiveViewer
 						rootPath={texRoot}
 						vaultPath={vaultPath}
@@ -344,7 +394,14 @@ const DocumentContent = memo(function DocumentContent({
 	}
 	if (!tab.loaded) {
 		if (!active && !keepMounted) return null;
-		return <TabLoadingSkeleton />;
+		return <TabLoadingSkeleton shape={tabSkeletonShape(tab)} />;
+	}
+	if (tab.loadError) {
+		return (
+			<p className="text-muted-foreground p-4 text-sm" role="status">
+				{tab.loadError}
+			</p>
+		);
 	}
 	if (tab.kind === "library") {
 		return (
@@ -352,10 +409,12 @@ const DocumentContent = memo(function DocumentContent({
 				papers={library.papers}
 				vaultPath={vaultPath}
 				active={active}
+				visible={active || keepMounted}
 				loading={library.loading}
 				query={library.query}
 				onQueryChange={library.onQueryChange}
 				scopePath={library.scopePath}
+				onNavigateFolder={library.onNavigateFolder}
 				columns={library.columns}
 				onColumnsChange={library.onColumnsChange}
 				onOpenPaper={library.onOpenPaper}
@@ -380,7 +439,7 @@ const DocumentContent = memo(function DocumentContent({
 		if (!plazaEnabled) return null;
 		// The tab owns its embedded page until close, independent of the editor LRU.
 		return (
-			<Suspense fallback={<TabLoadingSkeleton />}>
+			<Suspense fallback={<TabLoadingSkeleton shape={tabSkeletonShape(tab)} />}>
 				<PlazaTabView
 					key={`${tab.id}:${tab.path}`}
 					path={tab.path}
@@ -394,7 +453,7 @@ const DocumentContent = memo(function DocumentContent({
 		// Every conversation slot must stay mounted so background turns keep
 		// streaming, regardless of the editor/PDF keep-alive LRU.
 		return (
-			<Suspense fallback={<TabLoadingSkeleton />}>
+			<Suspense fallback={<TabLoadingSkeleton shape={tabSkeletonShape(tab)} />}>
 				<ZenView active={active} />
 			</Suspense>
 		);
@@ -416,7 +475,9 @@ const DocumentContent = memo(function DocumentContent({
 				data-paper-notes={isNotes || undefined}
 				className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-muted/30"
 			>
-				<Suspense fallback={<TabLoadingSkeleton />}>
+				<Suspense
+					fallback={<TabLoadingSkeleton shape={tabSkeletonShape(tab)} />}
+				>
 					<MarkdownEditor
 						// Stable per-tab key: external disk changes reload in place via
 						// `reloadKey` instead of remounting the whole editor. A source
@@ -469,7 +530,9 @@ const DocumentContent = memo(function DocumentContent({
 		if (!active && !keepMounted) return null;
 		return (
 			<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-				<Suspense fallback={<TabLoadingSkeleton />}>
+				<Suspense
+					fallback={<TabLoadingSkeleton shape={tabSkeletonShape(tab)} />}
+				>
 					<PdfViewer
 						source={tab.pdfUrl}
 						sourceBytes={tab.pdfBytes}
@@ -510,7 +573,9 @@ const DocumentContent = memo(function DocumentContent({
 		if (!active && !keepMounted) return null;
 		return (
 			<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-				<Suspense fallback={<TabLoadingSkeleton />}>
+				<Suspense
+					fallback={<TabLoadingSkeleton shape={tabSkeletonShape(tab)} />}
+				>
 					<PdfViewer
 						source={tab.pdfUrl}
 						sourceBytes={tab.pdfBytes}
@@ -553,10 +618,13 @@ const DocumentContent = memo(function DocumentContent({
 		);
 	}
 	if (tab.mode === "research-table") {
-		if (!active && !keepMounted) return <TabLoadingSkeleton />;
+		if (!active && !keepMounted)
+			return <TabLoadingSkeleton shape={tabSkeletonShape(tab)} />;
 		return (
 			<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-				<Suspense fallback={<TabLoadingSkeleton />}>
+				<Suspense
+					fallback={<TabLoadingSkeleton shape={tabSkeletonShape(tab)} />}
+				>
 					<TableViewer
 						key={tab.id}
 						path={tab.path}
@@ -574,13 +642,16 @@ const DocumentContent = memo(function DocumentContent({
 	}
 	if (tab.mode === "text") {
 		if (cloud.pending || (cloud.session && !cloud.shared))
-			return <TabLoadingSkeleton />;
+			return <TabLoadingSkeleton shape={tabSkeletonShape(tab)} />;
 		// Same keep-alive gate as the Markdown editor: an evicted tab's
 		// unmount flushes its pending autosave; remount re-seeds from disk.
-		if (!active && !keepMounted) return <TabLoadingSkeleton />;
+		if (!active && !keepMounted)
+			return <TabLoadingSkeleton shape={tabSkeletonShape(tab)} />;
 		const source = (
 			<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-				<Suspense fallback={<TabLoadingSkeleton />}>
+				<Suspense
+					fallback={<TabLoadingSkeleton shape={tabSkeletonShape(tab)} />}
+				>
 					<TextEditor
 						// Stable per-tab key: external disk changes swap the document
 						// in place via `reloadKey` (view state, scroll and undo
@@ -606,13 +677,30 @@ const DocumentContent = memo(function DocumentContent({
 	}
 	// HTML pages. Do not create their iframe (and therefore do not start a
 	// request) until the panel is actually activated. A `.html` file in the
-	// vault is a local preview; a paper body with `htmlUrl` stays remote.
+	// vault is a local preview; a paper body with `htmlUrl` stays remote (an
+	// imported webpage falls back to its offline snapshot when it has no URL).
 	if (!active) return null;
 	if (isHtmlPath(tab.path)) {
 		return (
 			<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
 				<LocalHtmlViewer
 					path={tab.path}
+					reloadKey={tab.htmlKey}
+					title={tab.title}
+					className="h-full w-full"
+				/>
+			</div>
+		);
+	}
+	// An imported webpage shows the live page like a paper's HTML view. Its
+	// offline snapshot (`webpage.html`, refreshed through Recapture) only stands
+	// in when the entry has no remote address; the file itself is also a child
+	// row of the paper for reading the saved copy.
+	if (!tab.htmlUrl && tab.htmlArchivePath) {
+		return (
+			<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+				<LocalHtmlViewer
+					path={tab.htmlArchivePath}
 					reloadKey={tab.htmlKey}
 					title={tab.title}
 					className="h-full w-full"

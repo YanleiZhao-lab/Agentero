@@ -1,4 +1,15 @@
-import { ChevronRight, CloudUpload, LoaderCircle, Unplug } from "lucide-react";
+import {
+	ArrowDownToLine,
+	ArrowUpFromLine,
+	ChevronRight,
+	CloudUpload,
+	LoaderCircle,
+	Plus,
+	Trash2,
+	TriangleAlert,
+	Unplug,
+	X,
+} from "lucide-react";
 import type { ComponentType } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -30,6 +41,14 @@ import {
 	CollapsibleContent,
 	CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
 	Select,
@@ -52,14 +71,19 @@ import type { ApiError } from "@/lib/core/ipc";
 import { errorMessage, notifyError, notifySuccess } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { displayPath } from "@/lib/core/path";
+import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import { isTauri } from "@/lib/core/tauri";
 import { toSafeDisposer } from "@/lib/core/tauri-events";
 import { cn } from "@/lib/core/utils";
 import {
 	emptySyncConfig,
+	isSyncMirrorPhase,
 	isSyncProgressPhase,
 	SYNC_INTERVAL_CHOICES,
 	type SyncBackendConfig,
+	type SyncMirrorStatus,
+	type SyncOverwriteDirection,
+	type SyncOverwritePreview,
 	type SyncProgressEvent,
 	type SyncScopeSizes,
 	type SyncStateEvent,
@@ -68,6 +92,8 @@ import {
 	syncDisconnect,
 	syncGetStatus,
 	syncNow,
+	syncOverwrite,
+	syncOverwritePreview,
 	syncScopeSizes,
 } from "@/lib/sync/api";
 import { vaultDisplayName } from "@/lib/vault/path";
@@ -166,6 +192,10 @@ const BACKEND_OPTIONS = [
 	{ value: "git", labelKey: "sync.backendGit" },
 ] as const;
 
+/** Dismissing the conditional-writes notice is a permanent, device-local choice. */
+const DEGRADED_NOTICE_DISMISSED_KEY =
+	"agentero.sync.degradedNoticeDismissed.v1";
+
 /** Local Vaults this pane can edit: the opener plus the shared MRU list. */
 function localVaultChoices(primary: string | null): string[] {
 	const out: string[] = [];
@@ -236,7 +266,25 @@ function VaultSyncForm({
 	const [progress, setProgress] = useState<SyncProgressEvent | null>(null);
 	const [syncError, setSyncError] = useState<string | null>(null);
 	const [advancedOpen, setAdvancedOpen] = useState(false);
+	const [degradedNoticeDismissed, setDegradedNoticeDismissed] = useState(() =>
+		readJsonStorage<boolean>(DEGRADED_NOTICE_DISMISSED_KEY, false),
+	);
+	const [overwriteDialog, setOverwriteDialog] = useState<{
+		direction: SyncOverwriteDirection;
+		preview: SyncOverwritePreview;
+	} | null>(null);
+	const [overwriting, setOverwriting] = useState(false);
 	const [scopeSizes, setScopeSizes] = useState<SyncScopeSizes | null>(null);
+	const [mirrors, setMirrors] = useState<SyncBackendConfig[]>([]);
+	const [mirrorsDirty, setMirrorsDirty] = useState(false);
+	// Live per-mirror state from `sync:mirror`, replaced by the persisted
+	// `lastSyncAt` / `lastError` on the next status refresh.
+	const [mirrorLive, setMirrorLive] = useState<
+		Record<
+			number,
+			{ status: "started" | "published" | "error"; error?: string }
+		>
+	>({});
 	const [activeOrgId, setActiveOrgId] = useState("");
 	const cloudSubject =
 		form.agenteroSubject === "organization" ? "organization" : "user";
@@ -263,6 +311,12 @@ function VaultSyncForm({
 		if (id !== requestId.current) return;
 		setStatus(next);
 		setSyncing(next.running);
+		if (mirrorsDirty) {
+			// Keep an in-progress mirror edit from being overwritten by a status
+			// refresh (the pane refreshes on every sync:state event).
+		} else {
+			setMirrors(next.mirrors.map((mirror) => mirror.config));
+		}
 		if (formVersion.current !== 0) return;
 		formVersion.current++;
 		if (next.config) {
@@ -280,7 +334,7 @@ function VaultSyncForm({
 			setForm(emptySyncConfig());
 			setAdvancedOpen(false);
 		}
-	}, [localVault]);
+	}, [localVault, mirrorsDirty]);
 
 	useEffect(() => {
 		void refresh().catch((error) => notifyError(errorMessage(error)));
@@ -304,7 +358,23 @@ function VaultSyncForm({
 					);
 					if (payload.status !== "syncing") {
 						setProgress(null);
+						setMirrorLive({});
 						void refresh().catch(() => undefined);
+					}
+					if (payload.status === "error") {
+						const detail = payload.error ?? t("sync.statusError");
+						notifyError(
+							payload.errorCode === "sync_no_conditional_writes"
+								? t("sync.noConditionalWrites")
+								: detail,
+							{
+								id: `sync:${localVault}`,
+								description:
+									payload.errorCode === "sync_no_conditional_writes"
+										? detail
+										: undefined,
+							},
+						);
 					}
 				}),
 			),
@@ -313,6 +383,23 @@ function VaultSyncForm({
 					const { vaultPath, phase, current, total } = event.payload;
 					if (vaultPath === localVault && isSyncProgressPhase(phase)) {
 						setProgress({ vaultPath, phase, current, total });
+					}
+				}),
+			),
+			toSafeDisposer(
+				events.syncMirror.listen((event) => {
+					const payload = event.payload;
+					if (payload.vaultPath !== localVault) return;
+					if (!isSyncMirrorPhase(payload.status)) return;
+					setMirrorLive((prev) => ({
+						...prev,
+						[payload.index]: {
+							status: payload.status as "started" | "published" | "error",
+							error: payload.error ?? undefined,
+						},
+					}));
+					if (payload.status !== "started") {
+						void refresh().catch(() => undefined);
 					}
 				}),
 			),
@@ -375,6 +462,11 @@ function VaultSyncForm({
 	const reportSyncError = (error: unknown) => {
 		const detail = errorMessage(error);
 		const code = error instanceof Error ? (error as ApiError).code : undefined;
+		if (code === "sync_no_conditional_writes") {
+			setSyncError(detail);
+			notifyError(t("sync.noConditionalWrites"), { description: detail });
+			return;
+		}
 		const message =
 			code === "git_auth_failed"
 				? t("sync.gitAuthFailed", { detail })
@@ -389,9 +481,11 @@ function VaultSyncForm({
 		const version = formVersion.current;
 		setSaving(true);
 		try {
-			const next = await syncConfigure(localVault, form);
+			const next = await syncConfigure(localVault, form, mirrors);
 			requestId.current++;
 			setStatus(next);
+			setMirrors(next.mirrors.map((mirror) => mirror.config));
+			setMirrorsDirty(false);
 			if (next.config && formVersion.current === version) {
 				formVersion.current++;
 				setForm(next.config);
@@ -444,6 +538,41 @@ function VaultSyncForm({
 		}
 	};
 
+	const openOverwrite = async (direction: SyncOverwriteDirection) => {
+		try {
+			const preview = await syncOverwritePreview(localVault, direction);
+			setOverwriteDialog({ direction, preview });
+		} catch (error) {
+			reportSyncError(error);
+		}
+	};
+
+	const confirmOverwrite = async () => {
+		if (!overwriteDialog) return;
+		setOverwriting(true);
+		try {
+			const outcome = await syncOverwrite(
+				localVault,
+				overwriteDialog.direction,
+			);
+			setOverwriteDialog(null);
+			setSyncError(null);
+			notifySuccess(
+				t("sync.overwriteDone", {
+					version: outcome.version,
+					up: outcome.uploaded,
+					down: outcome.downloaded,
+					deleted: outcome.deletedLocal,
+				}),
+			);
+		} catch (error) {
+			reportSyncError(error);
+		} finally {
+			setOverwriting(false);
+			void refresh().catch(() => undefined);
+		}
+	};
+
 	const field = (
 		key: keyof SyncBackendConfig,
 		opts?: { type?: string; placeholder?: string },
@@ -487,7 +616,10 @@ function VaultSyncForm({
 			: status?.configured
 				? "bg-emerald-500"
 				: "bg-muted-foreground/35";
-	const configChanged = JSON.stringify(form) !== JSON.stringify(status?.config);
+	const configChanged =
+		JSON.stringify(form) !== JSON.stringify(status?.config) ||
+		JSON.stringify(mirrors) !==
+			JSON.stringify((status?.mirrors ?? []).map((mirror) => mirror.config));
 	const primaryAction =
 		!status?.configured || configChanged ? (
 			<Button
@@ -578,12 +710,6 @@ function VaultSyncForm({
 					</SelectContent>
 				</Select>
 			</div>
-
-			{status?.configured && !isGit && !form.conditionalWrites ? (
-				<p className="mb-3 text-muted-foreground text-xs">
-					{t("sync.noConditionalWrites")}
-				</p>
-			) : null}
 
 			<div className="mb-3 flex flex-wrap items-center gap-2">
 				<span id="sync-backend-label" className="text-muted-foreground text-xs">
@@ -736,19 +862,95 @@ function VaultSyncForm({
 					</SettingsRow>
 				</SettingsGroup>
 			) : isWebdav ? (
-				<SettingsGroup>
-					<SettingsRow label={t("sync.serverUrl")} htmlFor="sync-webdavUrl">
-						{field("webdavUrl", {
-							placeholder: "https://dav.jianguoyun.com/dav/agentero",
-						})}
-					</SettingsRow>
-					<SettingsRow label={t("sync.username")} htmlFor="sync-webdavUsername">
-						{field("webdavUsername")}
-					</SettingsRow>
-					<SettingsRow label={t("sync.password")} htmlFor="sync-webdavPassword">
-						{field("webdavPassword", { type: "password" })}
-					</SettingsRow>
-				</SettingsGroup>
+				<>
+					{status?.configured &&
+					!form.conditionalWrites &&
+					!degradedNoticeDismissed ? (
+						<div className="mb-3 flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/5 px-3.5 py-2 text-xs">
+							<TriangleAlert
+								className="size-4 shrink-0 text-amber-600 dark:text-amber-500"
+								aria-hidden
+							/>
+							<span className="min-w-0 flex-1">
+								{t("sync.noConditionalWritesShort")}
+							</span>
+							<button
+								type="button"
+								className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+								aria-label={t("sync.dismissNotice")}
+								onClick={() => {
+									writeJsonStorage(DEGRADED_NOTICE_DISMISSED_KEY, true);
+									setDegradedNoticeDismissed(true);
+								}}
+							>
+								<X className="size-3.5" aria-hidden />
+							</button>
+						</div>
+					) : null}
+					<SettingsGroup>
+						<SettingsRow label={t("sync.serverUrl")} htmlFor="sync-webdavUrl">
+							{field("webdavUrl", {
+								placeholder: "https://dav.jianguoyun.com/dav/agentero",
+							})}
+						</SettingsRow>
+						<SettingsRow
+							label={t("sync.username")}
+							htmlFor="sync-webdavUsername"
+						>
+							{field("webdavUsername")}
+						</SettingsRow>
+						<SettingsRow
+							label={t("sync.password")}
+							htmlFor="sync-webdavPassword"
+						>
+							{field("webdavPassword", { type: "password" })}
+						</SettingsRow>
+						{status?.configured && !form.conditionalWrites ? (
+							<SettingsRow
+								label={
+									<HelpLabel
+										label={t("sync.allowDegradedSync")}
+										help={t("sync.degradedSyncRisk")}
+									/>
+								}
+								htmlFor="sync-allowDegradedSync"
+							>
+								<Switch
+									id="sync-allowDegradedSync"
+									checked={form.allowDegradedSync}
+									onCheckedChange={(value) =>
+										patch({ allowDegradedSync: value })
+									}
+									disabled={syncing || saving}
+								/>
+							</SettingsRow>
+						) : null}
+						{status?.configured && !configChanged ? (
+							<div className="flex flex-wrap items-center gap-2 px-3.5 py-2.5">
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									disabled={syncing || saving}
+									onClick={() => void openOverwrite("remoteToLocal")}
+								>
+									<ArrowDownToLine data-icon="inline-start" />
+									{t("sync.overwritePull")}
+								</Button>
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									disabled={syncing || saving}
+									onClick={() => void openOverwrite("localToRemote")}
+								>
+									<ArrowUpFromLine data-icon="inline-start" />
+									{t("sync.overwritePush")}
+								</Button>
+							</div>
+						) : null}
+					</SettingsGroup>
+				</>
 			) : (
 				<SettingsGroup>
 					<SettingsRow label={t("sync.endpoint")} htmlFor="sync-endpoint">
@@ -906,6 +1108,16 @@ function VaultSyncForm({
 				</Collapsible>
 			) : null}
 
+			<MirrorSection
+				mirrors={mirrors}
+				statuses={status?.mirrors ?? []}
+				live={mirrorLive}
+				onChange={(next) => {
+					setMirrorsDirty(true);
+					setMirrors(next);
+				}}
+			/>
+
 			<div className="flex items-center gap-2">
 				{status?.configured ? (
 					<Button
@@ -920,6 +1132,286 @@ function VaultSyncForm({
 					</Button>
 				) : null}
 			</div>
+			<Dialog
+				open={overwriteDialog !== null}
+				onOpenChange={(open) => {
+					if (!open && !overwriting) setOverwriteDialog(null);
+				}}
+			>
+				<DialogContent className="sm:max-w-md">
+					<DialogHeader>
+						<DialogTitle>
+							{overwriteDialog?.direction === "remoteToLocal"
+								? t("sync.overwritePullTitle")
+								: t("sync.overwritePushTitle")}
+						</DialogTitle>
+						<DialogDescription>
+							{overwriteDialog?.direction === "remoteToLocal"
+								? t("sync.overwritePullBody", {
+										delete: overwriteDialog.preview.willDeleteLocal,
+										download: overwriteDialog.preview.willDownload,
+										version: overwriteDialog.preview.remoteVersion,
+									})
+								: overwriteDialog
+									? t("sync.overwritePushBody", {
+											upload: overwriteDialog.preview.willUpload,
+											remove: overwriteDialog.preview.willRemoveRemote,
+											version: overwriteDialog.preview.remoteVersion,
+										})
+									: null}
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button
+							type="button"
+							variant="outline"
+							onClick={() => setOverwriteDialog(null)}
+							disabled={overwriting}
+						>
+							{t("sync.cancel")}
+						</Button>
+						<Button
+							type="button"
+							variant="destructive"
+							onClick={() => void confirmOverwrite()}
+							disabled={overwriting}
+						>
+							{overwriting ? (
+								<LoaderCircle
+									data-icon="inline-start"
+									className="animate-spin"
+								/>
+							) : null}
+							{t("sync.overwriteConfirm")}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</section>
+	);
+}
+
+/** True when two bindings point at the same mirror store (compare like
+ * `remote_identity` does: backend + address + account, never secrets). */
+function sameMirrorTarget(a: SyncBackendConfig, b: SyncBackendConfig): boolean {
+	if (a.backend !== b.backend) return false;
+	if (a.backend === "webdav") {
+		return (
+			a.webdavUrl.trim().replace(/\/+$/, "") ===
+				b.webdavUrl.trim().replace(/\/+$/, "") &&
+			a.webdavUsername.trim() === b.webdavUsername.trim()
+		);
+	}
+	if (a.backend === "git") {
+		return (
+			a.gitRemote.trim() === b.gitRemote.trim() &&
+			a.gitBranch.trim() === b.gitBranch.trim()
+		);
+	}
+	if (a.backend === "s3") {
+		return (
+			a.endpoint.trim() === b.endpoint.trim() &&
+			a.bucket.trim() === b.bucket.trim() &&
+			a.prefix.trim() === b.prefix.trim() &&
+			a.accessKey.trim() === b.accessKey.trim()
+		);
+	}
+	return false;
+}
+
+/** Read-only mirrors: published after each primary pass, never read back. */
+function MirrorSection({
+	mirrors,
+	statuses,
+	live,
+	onChange,
+}: {
+	mirrors: SyncBackendConfig[];
+	statuses: SyncMirrorStatus[];
+	live: Record<
+		number,
+		{ status: "started" | "published" | "error"; error?: string }
+	>;
+	onChange: (next: SyncBackendConfig[]) => void;
+}) {
+	const { t } = useTranslation("settings");
+	const patch = (index: number, partial: Partial<SyncBackendConfig>) =>
+		onChange(
+			mirrors.map((mirror, i) =>
+				i === index ? { ...mirror, ...partial } : mirror,
+			),
+		);
+
+	const field = (
+		index: number,
+		key: keyof SyncBackendConfig,
+		label: string,
+		type: "text" | "password" = "text",
+		placeholder?: string,
+	) => (
+		<Input
+			key={String(key)}
+			type={type}
+			value={String(mirrors[index][key] ?? "")}
+			onChange={(event) =>
+				patch(index, {
+					[key]: event.target.value,
+				} as Partial<SyncBackendConfig>)
+			}
+			placeholder={placeholder}
+			aria-label={label}
+			className="h-8 text-xs"
+		/>
+	);
+
+	return (
+		<>
+			<SettingsSectionLabel className="mt-4">
+				<HelpLabel label={t("sync.mirrors")} help={t("sync.mirrorsHint")} />
+			</SettingsSectionLabel>
+			<SettingsGroup>
+				{mirrors.map((mirror, index) => {
+					const status = statuses.find((entry) =>
+						sameMirrorTarget(entry.config, mirror),
+					);
+					const liveState = live[index];
+					const liveStatus = liveState?.status;
+					const dot =
+						liveStatus === "error" || status?.lastError
+							? "bg-destructive"
+							: liveStatus === "started"
+								? "bg-sky-500"
+								: liveStatus === "published" || status?.lastSyncAt
+									? "bg-emerald-500"
+									: "bg-muted-foreground/35";
+					const statusLabel =
+						liveStatus === "started"
+							? t("sync.mirrorPublishing")
+							: liveStatus === "error"
+								? (liveState?.error ?? t("sync.mirrorError"))
+								: status?.lastError
+									? t("sync.mirrorError")
+									: status?.lastSyncAt
+										? t("sync.mirrorLastPublished", {
+												time: formatLocaleTimestamp(status.lastSyncAt),
+											})
+										: t("sync.mirrorNeverPublished");
+					const statusTitle =
+						liveStatus === "error"
+							? (liveState?.error ?? statusLabel)
+							: (status?.lastError ?? statusLabel);
+					return (
+						<div
+							// biome-ignore lint/suspicious/noArrayIndexKey: controlled rows, append/remove only
+							key={`${mirror.backend}-${index}`}
+							className="space-y-2 border-border/50 border-t px-3 py-2 first:border-t-0"
+						>
+							<div className="flex flex-wrap items-center gap-2">
+								<Select
+									value={mirror.backend}
+									onValueChange={(value) => {
+										if (
+											value !== "s3" &&
+											value !== "webdav" &&
+											value !== "git"
+										) {
+											return;
+										}
+										patch(index, { ...emptySyncConfig(value) });
+									}}
+								>
+									<SelectTrigger
+										size="sm"
+										className="w-36"
+										aria-label={t("sync.mirrorBackend")}
+									>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="webdav">
+											{t("sync.backendWebdav")}
+										</SelectItem>
+										<SelectItem value="git">{t("sync.backendGit")}</SelectItem>
+										<SelectItem value="s3">{t("sync.backendS3")}</SelectItem>
+									</SelectContent>
+								</Select>
+								<span
+									role="status"
+									aria-label={statusLabel}
+									title={statusTitle}
+									className={cn("size-2 rounded-full", dot)}
+								/>
+								<span className="text-muted-foreground text-xs">
+									{t("sync.mirrorReadOnly")}
+								</span>
+								<Button
+									type="button"
+									size="icon"
+									variant="ghost"
+									className="ml-auto"
+									aria-label={t("sync.mirrorRemove")}
+									onClick={() =>
+										onChange(mirrors.filter((_, i) => i !== index))
+									}
+								>
+									<Trash2 className="size-4" />
+								</Button>
+							</div>
+							<div className="grid gap-2 sm:grid-cols-2">
+								{mirror.backend === "webdav" ? (
+									<>
+										{field(
+											index,
+											"webdavUrl",
+											t("sync.serverUrl"),
+											"text",
+											"https://dav.example.com/dav/agentero/",
+										)}
+										{field(index, "webdavUsername", t("sync.username"))}
+										{field(
+											index,
+											"webdavPassword",
+											t("sync.password"),
+											"password",
+										)}
+									</>
+								) : mirror.backend === "git" ? (
+									<>
+										{field(
+											index,
+											"gitRemote",
+											t("sync.gitRemote"),
+											"text",
+											"git@github.com:you/vault.git",
+										)}
+										{field(index, "gitBranch", t("sync.gitBranch"))}
+									</>
+								) : (
+									<>
+										{field(index, "endpoint", t("sync.endpoint"))}
+										{field(index, "bucket", t("sync.bucket"))}
+										{field(index, "prefix", t("sync.prefix"))}
+										{field(index, "accessKey", t("sync.accessKey"))}
+										{field(index, "secretKey", t("sync.secretKey"), "password")}
+									</>
+								)}
+							</div>
+						</div>
+					);
+				})}
+				<div className="px-3 py-2">
+					<Button
+						type="button"
+						size="sm"
+						variant="outline"
+						onClick={() => onChange([...mirrors, emptySyncConfig("webdav")])}
+						disabled={mirrors.length >= 3}
+					>
+						<Plus data-icon="inline-start" />
+						{t("sync.mirrorAdd")}
+					</Button>
+				</div>
+			</SettingsGroup>
+		</>
 	);
 }

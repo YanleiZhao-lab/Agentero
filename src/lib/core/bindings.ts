@@ -12,6 +12,12 @@ export const commands = {
 	 *  Domain side effects are not wired here: they run as
 	 *  [`AppSettingsStore::subscribe`] listeners registered by the app assembly
 	 *  (see `app/mod.rs`), fired inside `store.set` with the redacted snapshot.
+	 * 
+	 *  `async` is deliberate. A synchronous `#[tauri::command]` runs inside the
+	 *  WebView2 interface-thread IPC callback, and this path rewrites
+	 *  `settings.json` and fans out to every subscriber on each edit. Keep the
+	 *  `AppHandle` argument rather than `State<'_, _>`: an async command cannot
+	 *  borrow the invoke context.
 	 */
 	settingsSet: (settings: AppSettings_Deserialize) => __TAURI_INVOKE<ApiResult<AppSettings_Serialize>>("settings_set", { settings }),
 	/**
@@ -34,12 +40,8 @@ export const commands = {
 	 *  rejects the key (non-200 / non-200 code).
 	 */
 	easyScholarProbe: () => __TAURI_INVOKE<ApiResult<boolean>>("easy_scholar_probe"),
-	/**
-	 *  Probe the configured institution proxy (EZProxy/WebVPN) by fetching a
-	 *  known paywalled DOI through the rewrite and checking the response is a
-	 *  PDF. Returns a short human-readable result for the settings UI.
-	 */
-	institutionProxyProbe: () => __TAURI_INVOKE<ApiResult<string>>("institution_proxy_probe"),
+	/**  Verify access to the preset's campus page or the default publisher PDF. */
+	institutionProxyProbe: () => __TAURI_INVOKE<ApiResult<InstitutionProxyProbe>>("institution_proxy_probe"),
 	/**
 	 *  Built-in institution gateway presets for the settings quick-fill menu.
 	 *  The registry lives in `agentero-core/.../institution_proxy/presets.json`;
@@ -52,6 +54,10 @@ export const commands = {
 	 *  Resolves once the login window closes; `true` when a cookie was captured.
 	 */
 	institutionProxyLoginOpen: (prefix: string) => typedError<boolean, string>(__TAURI_INVOKE("institution_proxy_login_open", { prefix })),
+	/**  Use the official sign-in page, including any MFA required by the account. */
+	openreviewAuthLoginOpen: () => typedError<boolean, string>(__TAURI_INVOKE("openreview_auth_login_open")),
+	/**  Return the expiry of the account session for the Settings indicator. */
+	openreviewAccountExpiry: () => __TAURI_INVOKE<number | null>("openreview_account_expiry"),
 	builtinProviderStatus: () => __TAURI_INVOKE<ApiResult<BuiltinProviderStatus>>("builtin_provider_status"),
 	decisionGatewayDecide: (request: DecisionGatewayRequest) => __TAURI_INVOKE<ApiResult<DecisionGatewayResponse>>("decision_gateway_decide", { request }),
 	layoutModelStatus: () => __TAURI_INVOKE<ApiResult<LayoutModelStatus>>("layout_model_status"),
@@ -107,7 +113,7 @@ export const commands = {
 	doctorCheckNetwork: () => typedError<ApiResult<NetworkDoctorReport_Serialize>, string>(__TAURI_INVOKE("doctor_check_network")),
 	/**  List which known desktop apps are installed on this machine. */
 	desktopAppsProbe: () => typedError<ApiResult<DesktopAppStatus_Serialize[]>, string>(__TAURI_INVOKE("desktop_apps_probe")),
-	/**  Launch one installed desktop app (macOS or Windows). */
+	/**  Launch one installed desktop app (macOS, Windows or Linux). */
 	desktopAppOpen: (id: DesktopAppId) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("desktop_app_open", { id })),
 	/**
 	 *  Retarget in-flight agent runs that emit to `source_label` so later events
@@ -122,7 +128,12 @@ export const commands = {
 	jobLayoutAnalyzeEnqueue: (args: JobLayoutAnalyzeEnqueueArgs) => typedError<ApiResult<JobSnapshot>, string>(__TAURI_INVOKE("job_layout_analyze_enqueue", { args })),
 	/**  Request a document translation through the same queue used by imports. */
 	jobLayoutTranslateEnqueue: (args: JobLayoutTranslateEnqueueArgs) => typedError<ApiResult<JobSnapshot>, string>(__TAURI_INVOKE("job_layout_translate_enqueue", { args })),
-	jobLayoutTranslateClaim: (args: JobLayoutTranslateClaimArgs) => typedError<ApiResult<boolean>, string>(__TAURI_INVOKE("job_layout_translate_claim", { args })),
+	/**
+	 *  Claim a running renderer-executed job for the calling window. Rust
+	 *  broadcasts every `job:offer` to all windows; only the first claimer runs
+	 *  the frontend executor, so uploads / cloud calls happen once per job.
+	 */
+	jobRendererClaim: (args: JobRendererClaimArgs) => typedError<ApiResult<boolean>, string>(__TAURI_INVOKE("job_renderer_claim", { args })),
 	jobDownloadAssetsEnqueue: (args: JobEnqueueArgs) => typedError<ApiResult<JobSnapshot>, string>(__TAURI_INVOKE("job_download_assets_enqueue", { args })),
 	/**
 	 *  Enqueue a renderer-orchestrated import (magic wand / local PDF / plaza /
@@ -208,6 +219,10 @@ export const commands = {
 	 *  Remote vaults are not supported yet.
 	 */
 	agentResolveCitation: (vaultPath: string | null, source: string) => typedError<ApiResult<CitationTarget>, string>(__TAURI_INVOKE("agent_resolve_citation", { vaultPath, source })),
+	/**  Resolve a revision-bound research citation for navigation in the active Vault. */
+	agentResolveEvidence: (vaultPath: string, source: string) => typedError<[string, Json], string>(__TAURI_INVOKE("agent_resolve_evidence", { vaultPath, source })),
+	workspaceCliReply: (reply: WorkspaceReply) => __TAURI_INVOKE<void>("workspace_cli_reply", { reply }),
+	workspaceOpenSource: (vault: string, source: string) => typedError<null, string>(__TAURI_INVOKE("workspace_open_source", { vault, source })),
 	graphGetBacklinks: (vaultPath: string, path: string) => typedError<ApiResult<BacklinksResponse_Serialize>, string>(__TAURI_INVOKE("graph_get_backlinks", { vaultPath, path })),
 	wikiResolve: (vaultPath: string, sourcePath: string, linkText: string, syntax: "wikilink" | "markdown" | null) => typedError<ApiResult<WikiResolveResponse_Serialize>, string>(__TAURI_INVOKE("wiki_resolve", { vaultPath, sourcePath, linkText, syntax })),
 	/**  Resolve and read the exact source projection for one `![[...]]` embed. */
@@ -301,7 +316,8 @@ export const commands = {
 	/**
 	 *  Streaming translate: pushes each increment through `on_delta`, then returns
 	 *  the final text. Providers without a streaming path fall back to one-shot
-	 *  translation (no deltas, final text only).
+	 *  translation (no deltas, final text only). Streaming calls are timed by
+	 *  silence, not by a total deadline.
 	 */
 	translateTextStream: (args: TranslateTextArgs, onDelta: Channel<string>) => __TAURI_INVOKE<ApiResult<TranslateTextResult>>("translate_text_stream", { args, onDelta }),
 	dictionaryLookup: (text: string, targetLang: string) => __TAURI_INVOKE<ApiResult<DictionaryEntry[]>>("dictionary_lookup", { text, targetLang }),
@@ -331,6 +347,14 @@ export const commands = {
 	paperResolveIdentifier: (args: PaperResolveIdentifierArgs) => __TAURI_INVOKE<ApiResult<PaperRecord_Serialize>>("paper_resolve_identifier", { args }),
 	/**  Stage a path-less OS drop (File bytes as base64) into `~/.agentero/import-tmp/`. */
 	paperStageImportFile: (args: StageImportFileArgs) => __TAURI_INVOKE<ApiResult<StageImportFileResult>>("paper_stage_import_file", { args }),
+	/**
+	 *  Re-fetch the readable snapshot (`webpage.html` + `PAPER.md`) of a webpage
+	 *  entry. Backs the library "recapture" action for pages imported while the
+	 *  origin was unreachable or behind a WAF.
+	 */
+	paperRecaptureWebpage: (vaultPath: string, path: string) => typedError<ApiResult<WebpageSnapshotResult>, string>(__TAURI_INVOKE("paper_recapture_webpage", { vaultPath, path })),
+	/**  Verify access to a PDF on the catalog entry the user chose to retry. */
+	paperVerifyOpenreviewPdf: (vaultPath: string, path: string) => typedError<OpenReviewPdfVerification, string>(__TAURI_INVOKE("paper_verify_openreview_pdf", { vaultPath, path })),
 	/**
 	 *  Seed `{vault}/.agentero/templates/NOTES.md` with a starting template for
 	 *  the `custom` paper-note mode. Never overwrites an existing template.
@@ -610,6 +634,18 @@ export const commands = {
 	/**  List known external terminals for the "Open in Terminal" preference. */
 	terminalAppsProbe: () => typedError<ApiResult<TerminalAppStatus[]>, string>(__TAURI_INVOKE("terminal_apps_probe")),
 	/**
+	 *  List the menu rows for the path bar "Open with" control: the system file
+	 *  manager, the editors installed on this machine, and the terminal. Icons are
+	 *  real application icons (PNG data URLs) when the host can extract them.
+	 */
+	pathOpenWithApps: () => typedError<ApiResult<OpenWithApp[]>, string>(__TAURI_INVOKE("path_open_with_apps")),
+	/**
+	 *  Open `path` with a probed row id: `"finder"` (file manager), `"terminal"`
+	 *  (Settings-preferred terminal), or an installed editor. Directories open as
+	 *  themselves; files open their parent directory.
+	 */
+	pathOpenWith: (appId: string, path: string) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("path_open_with", { appId, path })),
+	/**
 	 *  Open a fresh Agentero window without restoring the last vault (`?fresh=1`).
 	 * 
 	 *  `async` is load-bearing: sync command handlers run on the main thread inside
@@ -655,14 +691,39 @@ export const commands = {
 	 *  is `Send` and keeps streaming from the blocking pool.
 	 */
 	zoteroSync: (args: ZoteroSyncArgs, onProgress: Channel<SyncProgress>) => __TAURI_INVOKE<ApiResult<ZoteroSyncResult>>("zotero_sync", { args, onProgress }),
+	/**
+	 *  Check an AlphaXiv API key with `GET /folders/v3` without saving it.
+	 *  An empty value or a mask rechecks the key already stored in Host settings.
+	 */
+	alphaxivTestKey: (apiKey: string) => __TAURI_INVOKE<ApiResult<AlphaXivAccount>>("alphaxiv_test_key", { apiKey }),
+	/**
+	 *  Validate a pasted AlphaXiv API key with `GET /folders/v3`, then store it.
+	 *  The returned settings snapshot masks the key. A failed check stores nothing.
+	 */
+	alphaxivSaveKey: (apiKey: string) => __TAURI_INVOKE<ApiResult<AlphaXivSaveResult_Serialize>>("alphaxiv_save_key", { apiKey }),
+	/**  Remove the stored AlphaXiv API key and the saved profile. */
+	alphaxivClearKey: () => __TAURI_INVOKE<ApiResult<AppSettings_Serialize>>("alphaxiv_clear_key"),
+	/**
+	 *  List the signed-in user's AlphaXiv folders. Each folder already includes
+	 *  its papers. Uses the stored key only.
+	 */
+	alphaxivListFolders: () => __TAURI_INVOKE<ApiResult<AlphaXivFolder[]>>("alphaxiv_list_folders"),
 	/**  Current sync binding + last-pass info for the settings pane. */
 	syncGetStatus: (args: SyncVaultArgs) => typedError<ApiResult<SyncStatus_Serialize>, string>(__TAURI_INVOKE("sync_get_status", { args })),
 	/**  Validate + connection-test + persist the S3 binding for a vault. */
-	syncConfigure: (args: SyncConfigureArgs) => typedError<ApiResult<SyncStatus_Serialize>, string>(__TAURI_INVOKE("sync_configure", { args })),
+	syncConfigure: (args: SyncConfigureArgs_Deserialize) => typedError<ApiResult<SyncStatus_Serialize>, string>(__TAURI_INVOKE("sync_configure", { args })),
 	/**  Remove the binding and local sync state (remote data stays untouched). */
 	syncDisconnect: (args: SyncVaultArgs) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("sync_disconnect", { args })),
 	/**  One full sync pass (manual trigger from the settings pane). */
 	syncNow: (args: SyncVaultArgs) => typedError<ApiResult<SyncOutcome>, string>(__TAURI_INVOKE("sync_now", { args })),
+	/**  Read-only impact preview for the manual-overwrite confirmation dialog. */
+	syncOverwritePreview: (args: SyncOverwriteArgs) => typedError<ApiResult<OverwritePreview>, string>(__TAURI_INVOKE("sync_overwrite_preview", { args })),
+	/**
+	 *  Manual overwrite: `remoteToLocal` mirrors the remote HEAD onto disk
+	 *  (discarding divergent local content); `localToRemote` publishes the local
+	 *  scan as the new HEAD. The UI confirms with a preview before calling this.
+	 */
+	syncOverwrite: (args: SyncOverwriteArgs) => typedError<ApiResult<SyncOutcome>, string>(__TAURI_INVOKE("sync_overwrite", { args })),
 	syncScopeSizes: (args: SyncVaultArgs) => typedError<ApiResult<SyncScopeSizes>, string>(__TAURI_INVOKE("sync_scope_sizes", { args })),
 	/**
 	 *  Used and included bytes for the signed-in personal or team space.
@@ -709,6 +770,10 @@ export const commands = {
 	version: string,
 	body: string | null,
 } | null, string>(__TAURI_INVOKE("app_update_check", { proxy, retryOnTimeout })),
+	appChangelog: (request: ChangelogRequest) => typedError<{
+	schemaVersion: number,
+	releases: ChangelogRelease[],
+} | null, string>(__TAURI_INVOKE("app_changelog", { request })),
 	cliInstallStatus: () => __TAURI_INVOKE<ApiResult<CliInstallStatus>>("cli_install_status"),
 	cliInstallCommand: (automatic: boolean | null) => __TAURI_INVOKE<ApiResult<CliInstallResult>>("cli_install_command", { automatic }),
 	cliUninstallCommand: () => __TAURI_INVOKE<ApiResult<CliInstallResult>>("cli_uninstall_command"),
@@ -846,6 +911,7 @@ export const events = {
 	agentUsage: makeEvent<AgentUsageEvt>("agent:usage"),
 	bridgeHostStatus: makeEvent<BridgeHostStatusEvent>("bridge:host-status"),
 	bridgePairRequest: makeEvent<BridgePairRequestEvent>("bridge:pair-request"),
+	cliWorkspace: makeEvent<WorkspaceCliRequestEvent>("cli:workspace"),
 	compileFinished: makeEvent<LatexCompileResult>("compile:finished"),
 	compileLog: makeEvent<CompileLogEvent>("compile:log"),
 	connectorError: makeEvent<ConnectorErrorEvent>("connector:error"),
@@ -868,6 +934,7 @@ export const events = {
 	settingsChanged: makeEvent<SettingsChangedEvent_Deserialize>("settings:changed"),
 	settingsSectionRequested: makeEvent<SettingsSectionRequestedEvent>("settings:section-requested"),
 	settingsVaultRequested: makeEvent<SettingsVaultRequestedEvent>("settings:vault-requested"),
+	syncMirror: makeEvent<SyncMirrorEvent_Deserialize>("sync:mirror"),
 	syncProgress: makeEvent<SyncProgressEvent>("sync:progress"),
 	syncState: makeEvent<SyncStateEvent_Deserialize>("sync:state"),
 	uiRequest: makeEvent<UiRequestEvent_Deserialize>("ui:request"),
@@ -929,6 +996,7 @@ export type AcpHistoryLine_Deserialize = {
 	/**  Ordered parts for agent lines (empty for user lines). */
 	parts?: AcpHistoryPart_Deserialize[],
 	sources?: string[],
+	artifacts?: PresentedFile[],
 };
 
 /**  A single history line reconstructed from ACP `session/load` replay. */
@@ -941,6 +1009,7 @@ export type AcpHistoryLine_Serialize = {
 	/**  Ordered parts for agent lines (empty for user lines). */
 	parts?: AcpHistoryPart_Serialize[],
 	sources?: string[],
+	artifacts?: PresentedFile[],
 };
 
 /**  Ordered slice of a replayed agent turn (mirrors the frontend `AgentPart`). */
@@ -1171,6 +1240,8 @@ export type AgentCompletedEvent_Serialize = AgentResultPayload_Serialize;
 export type AgentDescriptor = AgentDescriptor_Serialize | AgentDescriptor_Deserialize;
 
 export type AgentDescriptor_Deserialize = {
+	/**  Custom ACP harness can invoke local shell commands. */
+	supportsShell?: boolean,
 	id: string,
 	name: string,
 	template: AgentTemplate,
@@ -1187,6 +1258,8 @@ export type AgentDescriptor_Deserialize = {
 };
 
 export type AgentDescriptor_Serialize = {
+	/**  Custom ACP harness can invoke local shell commands. */
+	supportsShell: boolean,
 	id: string,
 	name: string,
 	template: AgentTemplate,
@@ -1326,6 +1399,11 @@ export type AgentModelsEvent_Deserialize = {
 	agentId: string,
 	/**  ACP config option id for the model selector. */
 	configId: string,
+	/**
+	 *  Model the agent reports as active. Empty means the agent did not report
+	 *  one; never invent it from the catalog — upstream agents can misreport
+	 *  `current` (see #1087), and callers treat empty as "unknown, always set".
+	 */
 	currentId: string,
 	models: AgentModelChoice_Deserialize[],
 };
@@ -1336,6 +1414,11 @@ export type AgentModelsEvent_Serialize = {
 	agentId: string,
 	/**  ACP config option id for the model selector. */
 	configId: string,
+	/**
+	 *  Model the agent reports as active. Empty means the agent did not report
+	 *  one; never invent it from the catalog — upstream agents can misreport
+	 *  `current` (see #1087), and callers treat empty as "unknown, always set".
+	 */
 	currentId: string,
 	models: AgentModelChoice_Serialize[],
 };
@@ -1385,7 +1468,9 @@ export type AgentResultPayload_Deserialize = {
 	content: string,
 	/**  ACP agent thought / reasoning (from AgentThoughtChunk), if any. */
 	reasoning?: string | null,
+	promptOnly?: boolean,
 	sources: string[],
+	artifacts?: PresentedFile[],
 	stopReason?: string | null,
 	/**
 	 *  Durable ACP provider session id for the next continue
@@ -1401,7 +1486,9 @@ export type AgentResultPayload_Serialize = {
 	content: string,
 	/**  ACP agent thought / reasoning (from AgentThoughtChunk), if any. */
 	reasoning?: string | null,
+	promptOnly: boolean,
 	sources: string[],
+	artifacts: PresentedFile[],
 	stopReason?: string | null,
 	/**
 	 *  Durable ACP provider session id for the next continue
@@ -1680,6 +1767,93 @@ export type AliasRepairResult = {
 	updatedPaths: string[],
 };
 
+/**  Account fields safe to show in Settings. No credential. */
+export type AlphaXivAccount = {
+	username: string,
+	email: string,
+	realName: string,
+	/**  `realName`, else `username`, else `email`, else `"AlphaXiv"`. */
+	label: string,
+};
+
+/**  One library folder. `papers` is the list the folder payload already included. */
+export type AlphaXivFolder = {
+	id: string,
+	name: string,
+	folderType: string,
+	order: number,
+	parentId: string,
+	sharingStatus: string,
+	/**
+	 *  Lucide icon name from the folder appearance (`cpu`). Empty when AlphaXiv
+	 *  leaves the mark to the client and sends `icon: null`.
+	 */
+	icon: string,
+	/**  Appearance palette name (`red`, `orange`, …). Empty when unset. */
+	color: string,
+	papers: AlphaXivFolderPaper[],
+	paperCount: number,
+};
+
+/**  One paper inside a folder payload. */
+export type AlphaXivFolderPaper = {
+	paperGroupId: string,
+	universalPaperId: string,
+	canonicalId: string,
+	paperVersionId: string,
+	title: string,
+	paperAbstract: string,
+	topics: string[],
+	authors: string[],
+	/**
+	 *  Original `addedAt` string, or the decimal timestamp when that is all
+	 *  the payload has. Empty when absent.
+	 */
+	addedAt: string,
+	/**  Bare public arXiv id (`1706.03762`). Empty for private uploads. */
+	arxivId: string,
+	importable: boolean,
+	/**  [`SKIP_REASON_PRIVATE`] when `importable` is false, otherwise empty. */
+	skipReason: string,
+	/**  `https://pdfs.assets.alphaxiv.org/{canonical}.pdf` for a public paper. */
+	pdfUrl: string,
+};
+
+/**
+ *  Settings snapshot after a successful key save. `settings.alphaxiv.apiKey`
+ *  is masked. `account` has no profile: API keys cannot read `GET /users/v3`.
+ */
+export type AlphaXivSaveResult = AlphaXivSaveResult_Serialize | AlphaXivSaveResult_Deserialize;
+
+/**
+ *  Settings snapshot after a successful key save. `settings.alphaxiv.apiKey`
+ *  is masked. `account` has no profile: API keys cannot read `GET /users/v3`.
+ */
+export type AlphaXivSaveResult_Deserialize = {
+	settings: AppSettings_Deserialize,
+	account: AlphaXivAccount,
+};
+
+/**
+ *  Settings snapshot after a successful key save. `settings.alphaxiv.apiKey`
+ *  is masked. `account` has no profile: API keys cannot read `GET /users/v3`.
+ */
+export type AlphaXivSaveResult_Serialize = {
+	settings: AppSettings_Serialize,
+	account: AlphaXivAccount,
+};
+
+/**
+ *  AlphaXiv credential kept in Host settings. `api_key` is a secret.
+ *  Profile fields stay empty: API keys cannot read `GET /users/v3`.
+ */
+export type AlphaXivSettings = {
+	apiKey?: string,
+	username?: string,
+	email?: string,
+	realName?: string,
+};
+
 export type ApiResult<T> = {
 	ok: boolean,
 	data: T | null,
@@ -1693,6 +1867,12 @@ export type AppSettings_Deserialize = {
 	shortcutOverrides?: { [key in string]: ShortcutBinding_Deserialize | null },
 	/**  EasyScholar key for journal ranking and impact-factor lookups. */
 	easyScholarKey?: string,
+	/**
+	 *  EasyScholar rank systems the Library table and Paper Info may display,
+	 *  in canonical order. Every supported system is on by default; an empty
+	 *  list hides the metrics without clearing the stored `#easyscholar:` tags.
+	 */
+	easyScholarRanks?: string[],
 	/**  知乎开放平台 Access Secret（内置「知乎」Agent 的直答 / 检索凭证）。 */
 	zhihuAccessSecret?: string,
 	networkProxyEnabled?: boolean,
@@ -1713,6 +1893,24 @@ export type AppSettings_Deserialize = {
 	 *  `subdomain` (Astraeus-style host mapping). Empty/unknown means `auto`.
 	 */
 	institutionProxyType?: string,
+	/**
+	 *  Cookie captured by the OpenReview verification window (`openreview.*`
+	 *  cookies, notably the short-lived `clearanceToken`). Empty = verified by
+	 *  nobody yet. Redacted to the frontend and attached only to OpenReview
+	 *  hosts by the download layer.
+	 */
+	openreviewCookie?: string,
+	/**
+	 *  Unix seconds when the captured OpenReview credential expires; `0` when
+	 *  the cookie carries no readable expiry. Drives the Settings status dot.
+	 */
+	openreviewCookieExpiresAt?: number,
+	/**
+	 *  AlphaXiv API key. The key is masked across IPC. A plaintext key in
+	 *  `settings_set` is ignored; only [`AppSettingsStore::update_alphaxiv_auth`]
+	 *  stores one, after `GET /folders/v3` succeeds. Profile fields stay empty.
+	 */
+	alphaxiv?: AlphaXivSettings,
 	paperTreeLabelMode?: string,
 	paperTreeSortMode?: string,
 	/**
@@ -1765,11 +1963,12 @@ export type AppSettings_Deserialize = {
 	/**  Loopback Streamable HTTP MCP server. Default off. */
 	mcpEnabled?: boolean,
 	mcpPort?: number,
-	/**
-	 *  Opt-in: expose paper full text (`paper_text_get`) through the MCP
-	 *  server. Default off — external clients only see metadata and NOTES.
-	 */
+	/**  Allow external MCP clients to read complete paper text. */
 	mcpExposePaperText?: boolean,
+	/**  Allow external MCP clients to modify the Vault. */
+	mcpAllowWrite?: boolean,
+	/**  Allow external MCP clients to use operations that contact online services. */
+	mcpAllowOnline?: boolean,
 	/**
 	 *  OpenAI Secure MCP Tunnel id (`tunnel_` + 32 hex) for the built-in
 	 *  `tunnel-client` supervisor. Empty = never configured.
@@ -1848,6 +2047,12 @@ export type AppSettings_Serialize = {
 	shortcutOverrides: { [key in string]: ShortcutBinding_Serialize | null },
 	/**  EasyScholar key for journal ranking and impact-factor lookups. */
 	easyScholarKey: string,
+	/**
+	 *  EasyScholar rank systems the Library table and Paper Info may display,
+	 *  in canonical order. Every supported system is on by default; an empty
+	 *  list hides the metrics without clearing the stored `#easyscholar:` tags.
+	 */
+	easyScholarRanks: string[],
 	/**  知乎开放平台 Access Secret（内置「知乎」Agent 的直答 / 检索凭证）。 */
 	zhihuAccessSecret: string,
 	networkProxyEnabled: boolean,
@@ -1868,6 +2073,24 @@ export type AppSettings_Serialize = {
 	 *  `subdomain` (Astraeus-style host mapping). Empty/unknown means `auto`.
 	 */
 	institutionProxyType: string,
+	/**
+	 *  Cookie captured by the OpenReview verification window (`openreview.*`
+	 *  cookies, notably the short-lived `clearanceToken`). Empty = verified by
+	 *  nobody yet. Redacted to the frontend and attached only to OpenReview
+	 *  hosts by the download layer.
+	 */
+	openreviewCookie: string,
+	/**
+	 *  Unix seconds when the captured OpenReview credential expires; `0` when
+	 *  the cookie carries no readable expiry. Drives the Settings status dot.
+	 */
+	openreviewCookieExpiresAt: number,
+	/**
+	 *  AlphaXiv API key. The key is masked across IPC. A plaintext key in
+	 *  `settings_set` is ignored; only [`AppSettingsStore::update_alphaxiv_auth`]
+	 *  stores one, after `GET /folders/v3` succeeds. Profile fields stay empty.
+	 */
+	alphaxiv: AlphaXivSettings,
 	paperTreeLabelMode: string,
 	paperTreeSortMode: string,
 	/**
@@ -1920,11 +2143,12 @@ export type AppSettings_Serialize = {
 	/**  Loopback Streamable HTTP MCP server. Default off. */
 	mcpEnabled: boolean,
 	mcpPort: number,
-	/**
-	 *  Opt-in: expose paper full text (`paper_text_get`) through the MCP
-	 *  server. Default off — external clients only see metadata and NOTES.
-	 */
+	/**  Allow external MCP clients to read complete paper text. */
 	mcpExposePaperText: boolean,
+	/**  Allow external MCP clients to modify the Vault. */
+	mcpAllowWrite: boolean,
+	/**  Allow external MCP clients to use operations that contact online services. */
+	mcpAllowOnline: boolean,
 	/**
 	 *  OpenAI Secure MCP Tunnel id (`tunnel_` + 32 hex) for the built-in
 	 *  `tunnel-client` supervisor. Empty = never configured.
@@ -2419,6 +2643,24 @@ export type CatalogUpdatePropertyArgs_Deserialize = {
 export type CatalogUpdatePropertyArgs_Serialize = {
 	vaultPath: string,
 	property: CustomProperty_Serialize,
+};
+
+export type Changelog = {
+	schemaVersion: number,
+	releases: ChangelogRelease[],
+};
+
+export type ChangelogRelease = {
+	tag: string,
+	releaseDate: string,
+	summary: ChangelogSummary | null,
+};
+
+export type ChangelogRequest = "cached" | "refresh" | "force";
+
+export type ChangelogSummary = {
+	en: string,
+	"zh-CN": string,
 };
 
 export type ChatImportExtractArgs = {
@@ -2936,20 +3178,30 @@ export type DepPolicy = "allSettled" | "allSucceeded";
 /**  Stable id the frontend keys rows and brand logos on. */
 export type DesktopAppId = "chatgpt" | "qwenwork" | "workbuddy" | "dsh-desktop";
 
-/**  Detection result: macOS bundle or Windows executable path when known. */
+/**  Detection result: the installed executable (or macOS bundle) path when known. */
 export type DesktopAppStatus = DesktopAppStatus_Serialize | DesktopAppStatus_Deserialize;
 
-/**  Detection result: macOS bundle or Windows executable path when known. */
+/**  Detection result: the installed executable (or macOS bundle) path when known. */
 export type DesktopAppStatus_Deserialize = {
 	id: DesktopAppId,
 	installed: boolean,
+	/**
+	 *  True when the vendor ships no build for this platform, so the row can
+	 *  never become installed here.
+	 */
+	unsupported: boolean,
 	path: string | null,
 };
 
-/**  Detection result: macOS bundle or Windows executable path when known. */
+/**  Detection result: the installed executable (or macOS bundle) path when known. */
 export type DesktopAppStatus_Serialize = {
 	id: DesktopAppId,
 	installed: boolean,
+	/**
+	 *  True when the vendor ships no build for this platform, so the row can
+	 *  never become installed here.
+	 */
+	unsupported?: boolean,
 	path?: string | null,
 };
 
@@ -3466,6 +3718,14 @@ export type InstitutionProxyPreset = {
 	subscriptionVerified?: boolean,
 };
 
+export type InstitutionProxyProbe = {
+	scope: InstitutionProxyProbeScope,
+	kind: string,
+	bytes: number,
+};
+
+export type InstitutionProxyProbeScope = "campusPage" | "pdf";
+
 /**
  *  A parsed explicit Vault-local link. Markdown remains the source of truth; this
  *  is only an in-memory, rebuildable occurrence projection.
@@ -3617,10 +3877,6 @@ export type JobLayoutAnalyzeEnqueueArgs = {
 	autoTranslate?: boolean,
 };
 
-export type JobLayoutTranslateClaimArgs = {
-	jobId: string,
-};
-
 export type JobLayoutTranslateEnqueueArgs = {
 	vaultPath: string,
 	path: string,
@@ -3688,6 +3944,10 @@ export type JobReconcilePaperArgs = {
 	path: string,
 };
 
+export type JobRendererClaimArgs = {
+	jobId: string,
+};
+
 export type JobReorderArgs = {
 	jobIds: string[],
 };
@@ -3748,7 +4008,7 @@ export type JobTerminalPayload_Deserialize = {
 	 *  Vault root as passed by the enqueuing caller (`JobSnapshot.vault_id`):
 	 *  frontend-initiated jobs carry the exact `getVaultPath()` string;
 	 *  host-internal jobs the Host's (usually canonical) form. Consumers
-	 *  must tolerate both spellings; see docs/backend/api.md (`job:completed`).
+	 *  must tolerate both spellings, including Windows paths with a `\\?\` prefix.
 	 */
 	vaultId: string,
 	paperId?: string | null,
@@ -3767,7 +4027,7 @@ export type JobTerminalPayload_Serialize = {
 	 *  Vault root as passed by the enqueuing caller (`JobSnapshot.vault_id`):
 	 *  frontend-initiated jobs carry the exact `getVaultPath()` string;
 	 *  host-internal jobs the Host's (usually canonical) form. Consumers
-	 *  must tolerate both spellings; see docs/backend/api.md (`job:completed`).
+	 *  must tolerate both spellings, including Windows paths with a `\\?\` prefix.
 	 */
 	vaultId: string,
 	paperId?: string | null,
@@ -4158,6 +4418,7 @@ export type LookupImportResult_Deserialize = {
 	paperMd?: boolean,
 	/**  Download / parse messages (for UI warnings). */
 	assetMessages?: string[],
+	openreviewPdfIssue: OpenReviewPdfIssue | null,
 	/**
 	 *  `Deduped` when the paper already existed and (for local PDFs) the PDF
 	 *  was merged into the existing entry instead of creating a duplicate.
@@ -4187,6 +4448,7 @@ export type LookupImportResult_Serialize = {
 	paperMd: boolean,
 	/**  Download / parse messages (for UI warnings). */
 	assetMessages: string[],
+	openreviewPdfIssue?: OpenReviewPdfIssue | null,
 	/**
 	 *  `Deduped` when the paper already existed and (for local PDFs) the PDF
 	 *  was merged into the existing entry instead of creating a duplicate.
@@ -4334,6 +4596,56 @@ export type OpenInTerminalResult = {
 	cwd: string,
 };
 
+
+/**  Why the OpenReview PDF is still missing after trying available sources. */
+export type OpenReviewPdfIssue = "verificationRequired" | "rateLimited" | "network" | "unavailable" | "downloadFailed";
+
+export type OpenReviewPdfVerification = {
+	verified: boolean,
+	url: string,
+};
+
+export type OpenWithApp = {
+	/**  Stable id used by `path_open_with`. */
+	id: string,
+	/**  Brand name shown verbatim. */
+	name: string,
+	/**  Grouping/fallback-glyph hint for the menu. */
+	kind: OpenWithKind,
+	/**
+	 *  Real application icon as a PNG data URL; `None` when this platform has
+	 *  no extractable icon and the menu renders a generic glyph instead.
+	 */
+	icon: string | null,
+};
+
+/**  Menu grouping/fallback-glyph hint for one entry. */
+export type OpenWithKind = "fileManager" | "editor" | "terminal";
+
+/**
+ *  Which side wins a manual overwrite. `RemoteToLocal` mirrors the remote
+ *  HEAD manifest onto disk (discarding divergent local content);
+ *  `LocalToRemote` publishes the local scan as the new HEAD (superseding
+ *  remote changes).
+ */
+export type OverwriteDirection = "remoteToLocal" | "localToRemote";
+
+/**
+ *  Impact preview for the confirmation dialog. Counts only; computed without
+ *  any local or remote write.
+ */
+export type OverwritePreview = {
+	/**  Local files the remote does not have (force pull deletes them). */
+	willDeleteLocal: number,
+	/**  Remote files force pull downloads or restores over local edits. */
+	willDownload: number,
+	/**  Remote files absent locally (force push drops them from the manifest). */
+	willRemoveRemote: number,
+	/**  Blobs force push uploads (local content the remote lacks). */
+	willUpload: number,
+	remoteVersion: number,
+};
+
 export type PairingRequest = {
 	requestId: string,
 	deviceId: string,
@@ -4366,6 +4678,7 @@ export type PaperCommitResult = {
 	tex: boolean,
 	paperMd: boolean,
 	assetMessages: string[],
+	openreviewPdfIssue: OpenReviewPdfIssue | null,
 	/**  True when assets are still downloading in the background (`Deferred`). */
 	assetsPending: boolean,
 };
@@ -4544,7 +4857,6 @@ export type PaperOpenBundleArgs = {
 export type PaperOpenBundle_Deserialize = {
 	paper: PaperRecord_Deserialize,
 	pathRel: string,
-	notesSeed: string | null,
 	pdfPath: string | null,
 	hasTex: boolean,
 	hasPaperMd: boolean,
@@ -4553,7 +4865,6 @@ export type PaperOpenBundle_Deserialize = {
 export type PaperOpenBundle_Serialize = {
 	paper: PaperRecord_Serialize,
 	pathRel: string,
-	notesSeed?: string | null,
 	pdfPath?: string | null,
 	hasTex: boolean,
 	hasPaperMd: boolean,
@@ -4920,6 +5231,12 @@ export type PlazaScratchPrepareArgs = {
 };
 
 export type PreparationReason = "downloadSource" | "parseBody" | "repairState";
+
+export type PresentedFile = {
+	vault: string,
+	path: string,
+	title: string | null,
+};
 
 export type ProbeEmbeddingArgs = {
 	/**  Override the stored base URL. Empty / missing keeps the stored value. */
@@ -5300,6 +5617,11 @@ export type RunOnceRequest_Deserialize = {
 	target?: string | null,
 	/**  Preferred model id from ACP session config (category: model). Applied after session/new. */
 	modelId?: string | null,
+	/**
+	 *  Force one `session/set_config_option` for `model_id` even when the agent
+	 *  reports it as current. Set for explicit user picks only (Fix #1087).
+	 */
+	forceModel?: boolean,
 	/**  Preferred Codex-style collaboration mode (`collaboration_mode`), e.g. default / plan. */
 	collaborationModeId?: string | null,
 	/**  Preferred ACP reasoning effort (category: thought_level). Applied after session/new. */
@@ -5335,7 +5657,7 @@ export type RunOnceRequest_Deserialize = {
 	/**
 	 *  Selection, open paper, and @ mentions for this turn.
 	 *  The host resolver writes the minimum evidence into the prompt and, for a
-	 *  local session, attaches the session-scoped `agentero-context` MCP.
+	 *  local session, binds the evidence CLI to this turn.
 	 *  Omit when the turn has no vault anchor.
 	 */
 	context?: ContextRequest_Deserialize | null,
@@ -5367,6 +5689,11 @@ export type RunOnceRequest_Serialize = {
 	target?: string | null,
 	/**  Preferred model id from ACP session config (category: model). Applied after session/new. */
 	modelId?: string | null,
+	/**
+	 *  Force one `session/set_config_option` for `model_id` even when the agent
+	 *  reports it as current. Set for explicit user picks only (Fix #1087).
+	 */
+	forceModel: boolean,
 	/**  Preferred Codex-style collaboration mode (`collaboration_mode`), e.g. default / plan. */
 	collaborationModeId?: string | null,
 	/**  Preferred ACP reasoning effort (category: thought_level). Applied after session/new. */
@@ -5402,7 +5729,7 @@ export type RunOnceRequest_Serialize = {
 	/**
 	 *  Selection, open paper, and @ mentions for this turn.
 	 *  The host resolver writes the minimum evidence into the prompt and, for a
-	 *  local session, attaches the session-scoped `agentero-context` MCP.
+	 *  local session, binds the evidence CLI to this turn.
 	 *  Omit when the turn has no vault anchor.
 	 */
 	context?: ContextRequest_Serialize | null,
@@ -5580,7 +5907,9 @@ export type StageImportFileResult = {
 	path: string,
 };
 
-export type SyncBackendConfig = {
+export type SyncBackendConfig = SyncBackendConfig_Serialize | SyncBackendConfig_Deserialize;
+
+export type SyncBackendConfig_Deserialize = {
 	/**  Backend discriminator; S3 fields or WebDAV fields apply accordingly. */
 	backend?: SyncBackendKind,
 	/**  S3-compatible endpoint, e.g. `https://<account>.r2.cloudflarestorage.com`. */
@@ -5591,6 +5920,8 @@ export type SyncBackendConfig = {
 	prefix?: string,
 	accessKey?: string,
 	secretKey?: string,
+	/**  Temporary S3 credential included in the SigV4 signed headers. */
+	sessionToken?: string | null,
 	/**
 	 *  `{endpoint}/{bucket}/key` instead of `{bucket}.{endpoint}/key`.
 	 *  Path style works with R2 / MinIO / AWS alike, so it is the default.
@@ -5638,10 +5969,90 @@ export type SyncBackendConfig = {
 	/**  Last conditional-write probe result. Unsafe stores cannot publish. */
 	conditionalWrites?: boolean,
 	/**
+	 *  Explicit per-device opt-in to the degraded protocol for stores that
+	 *  ignore conditional writes (publish lock + plain HEAD PUT + read-back
+	 *  verification). Off by default; the engine still hard-stops without it.
+	 *  Phase 1: WebDAV only. See `docs/development/sync-degraded-mode.md`.
+	 */
+	allowDegradedSync?: boolean,
+	/**
 	 *  Which bulky paper assets (PDF / LaTeX source / attachments) take part
 	 *  in sync. Notes, sidecars and marks always sync. Default: everything.
 	 */
 	scope?: SyncScope,
+};
+
+export type SyncBackendConfig_Serialize = {
+	/**  Backend discriminator; S3 fields or WebDAV fields apply accordingly. */
+	backend: SyncBackendKind,
+	/**  S3-compatible endpoint, e.g. `https://<account>.r2.cloudflarestorage.com`. */
+	endpoint: string,
+	region: string,
+	bucket: string,
+	/**  Optional key prefix inside the bucket (multiple vaults per bucket). */
+	prefix: string,
+	accessKey: string,
+	secretKey: string,
+	/**  Temporary S3 credential included in the SigV4 signed headers. */
+	sessionToken?: string | null,
+	/**
+	 *  `{endpoint}/{bucket}/key` instead of `{bucket}.{endpoint}/key`.
+	 *  Path style works with R2 / MinIO / AWS alike, so it is the default.
+	 */
+	forcePathStyle: boolean,
+	/**  WebDAV server directory, e.g. `https://dav.jianguoyun.com/dav/agentero/`. */
+	webdavUrl: string,
+	webdavUsername: string,
+	/**  Masked (`*`) on the way to the WebView, like the S3 secret key. */
+	webdavPassword: string,
+	/**
+	 *  Git remote URL or local path. Credentials are never stored here; the
+	 *  system credential helper / SSH agent is used. Non-loopback `http://`
+	 *  requires [`Self::git_allow_insecure_http`].
+	 */
+	gitRemote: string,
+	/**
+	 *  Branch to sync. Defaults to `main`; the vault's current branch must
+	 *  already match when it is an existing repository.
+	 */
+	gitBranch: string,
+	/**
+	 *  Allow a non-loopback `http://` Git remote. The credential travels in
+	 *  cleartext; leave this off unless the server is on a trusted intranet
+	 *  and has no HTTPS.
+	 */
+	gitAllowInsecureHttp: boolean,
+	/**
+	 *  Absolute path to a PEM CA bundle (`http.sslCAInfo`) for a self-signed
+	 *  HTTPS Git remote. Empty uses the system trust store.
+	 */
+	gitSslCaInfo: string,
+	/**  `user` or `organization`. Official cloud only. */
+	agenteroSubject: string,
+	/**  Organization id when [`Self::agentero_subject`] is `organization`. */
+	agenteroOrgId: string,
+	/**  API origin, for example `https://api.agentero.app`. No trailing slash. */
+	agenteroApi: string,
+	/**
+	 *  Automatic background sync: once on scheduler start (vault open), after
+	 *  30s of vault quiet, and every `interval_minutes`.
+	 */
+	autoSync: boolean,
+	intervalMinutes: number,
+	/**  Last conditional-write probe result. Unsafe stores cannot publish. */
+	conditionalWrites: boolean,
+	/**
+	 *  Explicit per-device opt-in to the degraded protocol for stores that
+	 *  ignore conditional writes (publish lock + plain HEAD PUT + read-back
+	 *  verification). Off by default; the engine still hard-stops without it.
+	 *  Phase 1: WebDAV only. See `docs/development/sync-degraded-mode.md`.
+	 */
+	allowDegradedSync: boolean,
+	/**
+	 *  Which bulky paper assets (PDF / LaTeX source / attachments) take part
+	 *  in sync. Notes, sidecars and marks always sync. Default: everything.
+	 */
+	scope: SyncScope,
 };
 
 /**
@@ -5669,9 +6080,26 @@ export type SyncCloudUsageArgs = {
 	orgId: string | null,
 };
 
-export type SyncConfigureArgs = {
+export type SyncConfigureArgs = SyncConfigureArgs_Serialize | SyncConfigureArgs_Deserialize;
+
+export type SyncConfigureArgs_Deserialize = {
 	vaultPath: string,
-	config: SyncBackendConfig,
+	config: SyncBackendConfig_Deserialize,
+	/**
+	 *  Read-only mirrors published after the primary pass. The primary stays
+	 *  the only backend that pulls and merges.
+	 */
+	mirrors?: SyncBackendConfig_Deserialize[],
+};
+
+export type SyncConfigureArgs_Serialize = {
+	vaultPath: string,
+	config: SyncBackendConfig_Serialize,
+	/**
+	 *  Read-only mirrors published after the primary pass. The primary stays
+	 *  the only backend that pulls and merges.
+	 */
+	mirrors: SyncBackendConfig_Serialize[],
 };
 
 /**
@@ -5684,6 +6112,59 @@ export type SyncConflict = {
 	reason: string,
 };
 
+/**
+ *  Owned mirror of the private borrowed `SyncMirrorEvent` in
+ *  `integration::sync::commands` (`started` / `published` / `error` per mirror).
+ */
+export type SyncMirrorEvent = SyncMirrorEvent_Serialize | SyncMirrorEvent_Deserialize;
+
+/**
+ *  Owned mirror of the private borrowed `SyncMirrorEvent` in
+ *  `integration::sync::commands` (`started` / `published` / `error` per mirror).
+ */
+export type SyncMirrorEvent_Deserialize = {
+	vaultPath: string,
+	/**  Zero-based position in the vault's mirror list. */
+	index: number,
+	identity: string,
+	backend: string,
+	status: string,
+	error?: string | null,
+};
+
+/**
+ *  Owned mirror of the private borrowed `SyncMirrorEvent` in
+ *  `integration::sync::commands` (`started` / `published` / `error` per mirror).
+ */
+export type SyncMirrorEvent_Serialize = {
+	vaultPath: string,
+	/**  Zero-based position in the vault's mirror list. */
+	index: number,
+	identity: string,
+	backend: string,
+	status: string,
+	error?: string | null,
+};
+
+/**  One read-only mirror and its last pass result. */
+export type SyncMirrorStatus = SyncMirrorStatus_Serialize | SyncMirrorStatus_Deserialize;
+
+/**  One read-only mirror and its last pass result. */
+export type SyncMirrorStatus_Deserialize = {
+	config: SyncBackendConfig_Deserialize,
+	lastSyncAt: string | null,
+	lastVersion: number,
+	lastError: string | null,
+};
+
+/**  One read-only mirror and its last pass result. */
+export type SyncMirrorStatus_Serialize = {
+	config: SyncBackendConfig_Serialize,
+	lastSyncAt?: string | null,
+	lastVersion: number,
+	lastError?: string | null,
+};
+
 export type SyncOutcome = {
 	version: number,
 	uploaded: number,
@@ -5691,6 +6172,11 @@ export type SyncOutcome = {
 	deletedLocal: number,
 	removedRemote: number,
 	conflictCopies: string[],
+};
+
+export type SyncOverwriteArgs = {
+	vaultPath: string,
+	direction: OverwriteDirection,
 };
 
 /**  Progress event streamed to the UI while a sync runs. */
@@ -5746,6 +6232,7 @@ export type SyncStateEvent_Deserialize = {
 	vaultPath: string,
 	status: string,
 	error?: string | null,
+	errorCode?: string | null,
 };
 
 /**
@@ -5756,24 +6243,29 @@ export type SyncStateEvent_Serialize = {
 	vaultPath: string,
 	status: string,
 	error?: string | null,
+	errorCode?: string | null,
 };
 
 export type SyncStatus = SyncStatus_Serialize | SyncStatus_Deserialize;
 
 export type SyncStatus_Deserialize = {
 	configured: boolean,
-	config: SyncBackendConfig | null,
+	config: SyncBackendConfig_Deserialize | null,
 	running: boolean,
 	lastSyncAt: string | null,
 	lastVersion: number,
+	/**  Mirrors in configuration order; empty for a single-backend binding. */
+	mirrors?: SyncMirrorStatus_Deserialize[],
 };
 
 export type SyncStatus_Serialize = {
 	configured: boolean,
-	config?: SyncBackendConfig | null,
+	config?: SyncBackendConfig_Serialize | null,
 	running: boolean,
 	lastSyncAt?: string | null,
 	lastVersion: number,
+	/**  Mirrors in configuration order; empty for a single-backend binding. */
+	mirrors: SyncMirrorStatus_Serialize[],
 };
 
 export type SyncTexLocation = {
@@ -6029,6 +6521,8 @@ export type UninstallScopeInfo = {
 export type UpsertAgentRequest = UpsertAgentRequest_Serialize | UpsertAgentRequest_Deserialize;
 
 export type UpsertAgentRequest_Deserialize = {
+	/**  Custom ACP harness can invoke local shell commands. */
+	supportsShell?: boolean,
 	id?: string | null,
 	name: string,
 	template?: AgentTemplate | null,
@@ -6039,6 +6533,8 @@ export type UpsertAgentRequest_Deserialize = {
 };
 
 export type UpsertAgentRequest_Serialize = {
+	/**  Custom ACP harness can invoke local shell commands. */
+	supportsShell: boolean,
 	id?: string | null,
 	name: string,
 	template: AgentTemplate | null,
@@ -6244,6 +6740,11 @@ export type WarmRequest_Deserialize = {
 	agentId?: string | null,
 	vaultPath?: string | null,
 	modelId?: string | null,
+	/**
+	 *  Force one `session/set_config_option` for `model_id` even when the agent
+	 *  reports it as current. Set for explicit user picks only (Fix #1087).
+	 */
+	forceModel?: boolean,
 	/**  Preferred collaboration mode (`collaboration_mode`: default / plan). */
 	collaborationModeId?: string | null,
 };
@@ -6253,6 +6754,11 @@ export type WarmRequest_Serialize = {
 	agentId?: string | null,
 	vaultPath?: string | null,
 	modelId?: string | null,
+	/**
+	 *  Force one `session/set_config_option` for `model_id` even when the agent
+	 *  reports it as current. Set for explicit user picks only (Fix #1087).
+	 */
+	forceModel: boolean,
 	/**  Preferred collaboration mode (`collaboration_mode`: default / plan). */
 	collaborationModeId?: string | null,
 };
@@ -6263,6 +6769,7 @@ export type WarmResult_Deserialize = {
 	agentId: string,
 	ok: boolean,
 	models?: AgentModelsEvent_Deserialize | null,
+	collaboration?: AgentCollaborationEvent_Deserialize | null,
 	usageUsed?: number | null,
 	usageSize?: number | null,
 	error?: string | null,
@@ -6272,6 +6779,7 @@ export type WarmResult_Serialize = {
 	agentId: string,
 	ok: boolean,
 	models?: AgentModelsEvent_Serialize | null,
+	collaboration?: AgentCollaborationEvent_Serialize | null,
 	usageUsed?: number | null,
 	usageSize?: number | null,
 	error?: string | null,
@@ -6280,6 +6788,13 @@ export type WarmResult_Serialize = {
 export type WebProxyAllowHostArgs = {
 	/**  Public DNS host the viewer is about to load through the proxy. */
 	host: string,
+};
+
+export type WebpageSnapshotResult = {
+	/**  Vault-relative paper folder that now holds the snapshot. */
+	path: string,
+	/**  Bytes written: `webpage.html` + `PAPER.md`. */
+	bytes: number,
 };
 
 export type WikiApplyExternalRenameArgs = {
@@ -6692,6 +7207,21 @@ export type WordSubmit = {
 	style: string,
 };
 
+export type WorkspaceCliRequestEvent = WorkspaceRequest;
+
+export type WorkspaceReply = {
+	id: string,
+	value: Json,
+	error: string | null,
+};
+
+export type WorkspaceRequest = {
+	id: string,
+	route: string,
+	vault: string | null,
+	args: Json,
+};
+
 export type WritingGitCommit = {
 	id: string,
 	at: number,
@@ -6798,6 +7328,19 @@ export type ZoteroMigrateArgs = {
 	migrateAnnotations?: boolean,
 };
 
+/**
+ *  One item the migration could not import, with enough context to find it in
+ *  Zotero again and to explain the failure.
+ */
+export type ZoteroMigrateFailure = {
+	/**  Zotero itemID (the item's own id, or the note's itemID for standalone notes). */
+	itemId: number,
+	title: string,
+	/**  DOI as stored in Zotero (`DOI` field), when the item has one. */
+	doi: string | null,
+	message: string,
+};
+
 export type ZoteroMigrateResult = {
 	imported: number,
 	skipped: number,
@@ -6822,7 +7365,12 @@ export type ZoteroMigrateResult = {
 	/**  Orphan catalog rows removed before import (paper folder gone from disk). */
 	pruned: number,
 	paths: string[],
-	errors: string[],
+	/**
+	 *  Per-item failures. `message` is the Host error text; `title` / `doi` let
+	 *  the UI (and the log) point at the exact Zotero entry instead of a bare
+	 *  count.
+	 */
+	failures: ZoteroMigrateFailure[],
 };
 
 export type ZoteroScan = ZoteroScan_Serialize | ZoteroScan_Deserialize;

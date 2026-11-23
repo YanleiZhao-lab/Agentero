@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
 	type InstitutionProxyPresetOption,
@@ -26,7 +26,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { commands } from "@/lib/core/bindings";
+import { commands, type InstitutionProxyProbe } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { callApi, callResult } from "@/lib/core/ipc";
 import { notifyError, notifySuccess } from "@/lib/core/notify";
@@ -43,21 +43,17 @@ import {
 	type AutoUpdateInternalLinks,
 	PAPER_NOTE_MODES,
 	type PaperNoteMode,
-	PDF_SCROLL_STRATEGIES,
-	PDF_SPREAD_MODES,
-	PDF_TRANSLATE_TAB_MODES,
-	type PdfScrollStrategy,
-	type PdfSpreadMode,
-	type PdfTranslateTabMode,
 	saveSettingsAsync,
 } from "@/lib/settings";
 import { DEFAULT_NETWORK_PROXY_URL } from "@/lib/settings/defaults";
 import type { ProbeStatus } from "@/lib/ui/probe-status";
 import { notesTemplateSeed } from "@/lib/vault/note-template";
+import { AlphaXivAuthCard } from "./general/alphaxiv-auth-card";
 import { ConnectorSettingsBlock } from "./general/connector-settings-block";
 import { EasyScholarSettingsBlock } from "./general/easy-scholar-settings-block";
 import { FinderIntegrationRow } from "./general/finder-integration-row";
 import { McpSettingsBlock } from "./general/mcp-settings-block";
+import { OpenReviewAuthRow } from "./general/openreview-auth-row";
 import { PrivacySettingsBlock } from "./general/privacy-settings-block";
 import { TerminalAppRow } from "./general/terminal-app-row";
 
@@ -89,41 +85,77 @@ export function GeneralPane({
 	>([]);
 	const [institutionProxyTesting, setInstitutionProxyTesting] = useState(false);
 	const [institutionProxyResult, setInstitutionProxyResult] = useState<
-		{ status: "ok" | "fail"; message: string } | undefined
+		| { status: "ok"; probe: InstitutionProxyProbe }
+		| { status: "fail"; message: string }
+		| undefined
 	>(undefined);
+	const proxySettingsDraft = useCallback(() => {
+		const prefix = institutionProxyPrefixDraft.trim().replace(/\/+$/, "");
+		return {
+			institutionProxyPrefix: prefix,
+			institutionProxyCookie:
+				prefix === settings.institutionProxyPrefix ||
+				institutionProxyCookieDraft !== settings.institutionProxyCookie
+					? institutionProxyCookieDraft.trim()
+					: "",
+		};
+	}, [
+		institutionProxyPrefixDraft,
+		institutionProxyCookieDraft,
+		settings.institutionProxyPrefix,
+		settings.institutionProxyCookie,
+	]);
 	const commitInstitutionProxy = useCallback(() => {
-		patch({
-			institutionProxyPrefix: institutionProxyPrefixDraft.trim(),
-			institutionProxyCookie: institutionProxyCookieDraft.trim(),
-		});
-	}, [institutionProxyPrefixDraft, institutionProxyCookieDraft, patch]);
+		const next = proxySettingsDraft();
+		if (next.institutionProxyPrefix !== settings.institutionProxyPrefix) {
+			setInstitutionProxyResult(undefined);
+		}
+		patch(next);
+	}, [proxySettingsDraft, patch, settings.institutionProxyPrefix]);
+	const proxyConfigKey = JSON.stringify([
+		settings.institutionProxyType,
+		settings.institutionProxyPrefix,
+		settings.institutionProxyCookie,
+	]);
+	const proxyProbeGeneration = useRef({ configKey: proxyConfigKey });
+	useEffect(() => {
+		proxyProbeGeneration.current = { configKey: proxyConfigKey };
+		setInstitutionProxyResult(undefined);
+		setInstitutionProxyTesting(false);
+	}, [proxyConfigKey]);
 	const testInstitutionProxy = useCallback(async () => {
+		const generation = { configKey: proxyProbeGeneration.current.configKey };
+		proxyProbeGeneration.current = generation;
 		setInstitutionProxyTesting(true);
 		setInstitutionProxyResult(undefined);
 		try {
 			const result = await commands.institutionProxyProbe();
+			if (generation !== proxyProbeGeneration.current) return;
 			setInstitutionProxyResult(
-				result.ok
-					? { status: "ok", message: result.data ?? "" }
+				result.ok && result.data
+					? { status: "ok", probe: result.data }
 					: { status: "fail", message: result.error?.message ?? "failed" },
 			);
 			if (result.error?.code === "institution_proxy_auth_required") {
 				notifyError(t("general.institutionProxy.cookieExpired"));
 			}
 		} catch (error) {
+			if (generation !== proxyProbeGeneration.current) return;
 			setInstitutionProxyResult({
 				status: "fail",
 				message: error instanceof Error ? error.message : "failed",
 			});
 		} finally {
-			setInstitutionProxyTesting(false);
+			if (generation === proxyProbeGeneration.current)
+				setInstitutionProxyTesting(false);
 		}
 	}, [t]);
 	const openInstitutionLogin = useCallback(async () => {
-		commitInstitutionProxy();
 		try {
+			const pending = proxySettingsDraft();
+			await saveSettingsAsync({ ...settings, ...pending });
 			const captured = await callResult(() =>
-				commands.institutionProxyLoginOpen(institutionProxyPrefixDraft),
+				commands.institutionProxyLoginOpen(pending.institutionProxyPrefix),
 			);
 			if (captured) void testInstitutionProxy();
 		} catch (error) {
@@ -131,12 +163,7 @@ export function GeneralPane({
 				description: errorText(error),
 			});
 		}
-	}, [
-		commitInstitutionProxy,
-		institutionProxyPrefixDraft,
-		t,
-		testInstitutionProxy,
-	]);
+	}, [proxySettingsDraft, settings, t, testInstitutionProxy]);
 	useEffect(() => {
 		if (!isTauri()) return;
 		let cancelled = false;
@@ -159,13 +186,21 @@ export function GeneralPane({
 	}, [t]);
 	const selectInstitutionProxyPreset = useCallback(
 		(preset: InstitutionProxyPresetOption) => {
+			const changed =
+				preset.prefix !== settings.institutionProxyPrefix ||
+				preset.kind !== settings.institutionProxyType;
 			setInstitutionProxyPrefixDraft(preset.prefix);
+			if (changed) {
+				setInstitutionProxyCookieDraft("");
+				setInstitutionProxyResult(undefined);
+			}
 			patch({
 				institutionProxyPrefix: preset.prefix,
 				institutionProxyType: preset.kind,
+				institutionProxyCookie: changed ? "" : settings.institutionProxyCookie,
 			});
 		},
-		[patch],
+		[patch, settings],
 	);
 	const institutionProxyProbeStatus: ProbeStatus = institutionProxyTesting
 		? "probing"
@@ -179,6 +214,13 @@ export function GeneralPane({
 					? "general.institutionProxy.probeFail"
 					: "general.institutionProxy.probeIdle",
 	);
+	const institutionProxyProbeDetail =
+		institutionProxyResult?.status === "ok"
+			? t(
+					`general.institutionProxy.probeScope.${institutionProxyResult.probe.scope}`,
+					institutionProxyResult.probe,
+				)
+			: institutionProxyResult?.message;
 	const institutionProxyTypeRow = (
 		<SettingsRow
 			label={t("general.institutionProxy.typeLabel")}
@@ -187,7 +229,7 @@ export function GeneralPane({
 			<Select
 				value={settings.institutionProxyType}
 				onValueChange={(institutionProxyType) =>
-					patch({ institutionProxyType })
+					patch({ institutionProxyType, institutionProxyCookie: "" })
 				}
 			>
 				<SelectTrigger
@@ -242,13 +284,12 @@ export function GeneralPane({
 
 	useEffect(() => {
 		setProxyUrlDraft(settings.networkProxyUrl);
+	}, [settings.networkProxyUrl]);
+
+	useEffect(() => {
 		setInstitutionProxyPrefixDraft(settings.institutionProxyPrefix);
 		setInstitutionProxyCookieDraft(settings.institutionProxyCookie);
-	}, [
-		settings.networkProxyUrl,
-		settings.institutionProxyPrefix,
-		settings.institutionProxyCookie,
-	]);
+	}, [settings.institutionProxyPrefix, settings.institutionProxyCookie]);
 
 	useEffect(() => {
 		setEasyScholarKeyDraft(settings.easyScholarKey);
@@ -437,134 +478,6 @@ export function GeneralPane({
 			</SettingsGroup>
 
 			<SettingsSectionLabel className="mt-4">
-				{t("general.sections.keyboard")}
-			</SettingsSectionLabel>
-			<SettingsGroup>
-				<SettingsRow
-					label={t("general.vimMode.label")}
-					htmlFor="vim-mode"
-					description={t("general.vimMode.description")}
-				>
-					<Switch
-						id="vim-mode"
-						checked={settings.vimMode}
-						onCheckedChange={(checked) => patch({ vimMode: checked })}
-					/>
-				</SettingsRow>
-			</SettingsGroup>
-
-			<SettingsSectionLabel className="mt-4">
-				{t("general.sections.pdf")}
-			</SettingsSectionLabel>
-			<SettingsGroup>
-				<SettingsRow label={t("general.pdfScrollStrategy.label")}>
-					<Select
-						value={settings.pdfScrollStrategy}
-						onValueChange={(value) =>
-							patch({ pdfScrollStrategy: value as PdfScrollStrategy })
-						}
-					>
-						<SelectTrigger size="sm" className="min-w-[180px] max-w-[240px]">
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{PDF_SCROLL_STRATEGIES.map((strategy) => (
-								<SelectItem key={strategy} value={strategy}>
-									{t(`general.pdfScrollStrategy.${strategy}`)}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-				</SettingsRow>
-				<SettingsRow
-					label={t("general.pdfVimKeys.label")}
-					htmlFor="pdf-vim-keys"
-					description={
-						settings.vimMode
-							? undefined
-							: t("general.pdfVimKeys.requiresVimMode")
-					}
-				>
-					<Switch
-						id="pdf-vim-keys"
-						disabled={!settings.vimMode}
-						checked={settings.pdfVimKeys}
-						onCheckedChange={(checked) => patch({ pdfVimKeys: checked })}
-					/>
-				</SettingsRow>
-				<SettingsRow label={t("general.pdfSpreadMode.label")}>
-					<Select
-						disabled={settings.pdfScrollStrategy === "paginated"}
-						value={
-							settings.pdfScrollStrategy === "paginated"
-								? "none"
-								: settings.pdfSpreadMode
-						}
-						onValueChange={(value) =>
-							patch({ pdfSpreadMode: value as PdfSpreadMode })
-						}
-					>
-						<SelectTrigger size="sm" className="min-w-[180px] max-w-[240px]">
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{PDF_SPREAD_MODES.map((mode) => (
-								<SelectItem key={mode} value={mode}>
-									{t(`general.pdfSpreadMode.${mode}`)}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-				</SettingsRow>
-				<SettingsRow
-					label={t("general.pdfTranslateTab.label")}
-					description={t("general.pdfTranslateTab.description")}
-				>
-					<Select
-						value={settings.pdfTranslateTab}
-						onValueChange={(value) =>
-							patch({ pdfTranslateTab: value as PdfTranslateTabMode })
-						}
-					>
-						<SelectTrigger size="sm" className="min-w-[180px] max-w-[240px]">
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{PDF_TRANSLATE_TAB_MODES.map((mode) => (
-								<SelectItem key={mode} value={mode}>
-									{t(`general.pdfTranslateTab.${mode}`)}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-				</SettingsRow>
-			</SettingsGroup>
-
-			<SettingsSectionLabel className="mt-4">
-				{t("general.sections.plaza")}
-			</SettingsSectionLabel>
-			<SettingsGroup>
-				<SettingsRow label={t("general.plaza.label")} htmlFor="plaza-enabled">
-					<Switch
-						id="plaza-enabled"
-						checked={settings.plazaEnabled}
-						onCheckedChange={(v) => patch({ plazaEnabled: v })}
-					/>
-				</SettingsRow>
-			</SettingsGroup>
-
-			<SettingsSectionLabel className="mt-4">
-				{t("general.sections.system")}
-			</SettingsSectionLabel>
-			<SettingsGroup>
-				<TerminalAppRow
-					value={settings.terminalApp}
-					onChange={(terminalApp) => patch({ terminalApp })}
-				/>
-				<FinderIntegrationRow />
-			</SettingsGroup>
-
-			<SettingsSectionLabel className="mt-4">
 				{t("general.sections.network")}
 			</SettingsSectionLabel>
 			<SettingsGroup>
@@ -620,7 +533,7 @@ export function GeneralPane({
 					testing={institutionProxyTesting}
 					probeStatus={institutionProxyProbeStatus}
 					probeLabel={institutionProxyProbeLabel}
-					probeDetail={institutionProxyResult?.message}
+					probeDetail={institutionProxyProbeDetail}
 				/>
 			</SettingsGroup>
 			<SettingsSectionLabel className="mt-4">
@@ -631,6 +544,17 @@ export function GeneralPane({
 				savedKey={settings.easyScholarKey}
 				keyDraft={easyScholarKeyDraft}
 				onKeyDraftChange={setEasyScholarKeyDraft}
+				ranks={settings.easyScholarRanks}
+				onRanksChange={async (next) => {
+					try {
+						await saveSettingsAsync({
+							...settings,
+							easyScholarRanks: next,
+						});
+					} catch (e) {
+						notifyError(errorText(e));
+					}
+				}}
 				onCommitKey={async (value) => {
 					const trimmed = value.trim();
 					const next = await saveSettingsAsync({
@@ -640,12 +564,29 @@ export function GeneralPane({
 					setEasyScholarKeyDraft(next.easyScholarKey);
 				}}
 			/>
+			<AlphaXivAuthCard alphaxiv={settings.alphaxiv} />
+			<SettingsGroup>
+				<OpenReviewAuthRow
+					cookie={settings.openreviewCookie}
+					expiresAt={settings.openreviewCookieExpiresAt}
+				/>
+			</SettingsGroup>
 			<SettingsSectionLabel>{t("general.sections.mcp")}</SettingsSectionLabel>
 			<McpSettingsBlock
 				settings={settings}
 				patch={patch}
 				disabled={hostContext.kind === "remote"}
 			/>
+			<SettingsSectionLabel className="mt-4">
+				{t("general.sections.system")}
+			</SettingsSectionLabel>
+			<SettingsGroup>
+				<TerminalAppRow
+					value={settings.terminalApp}
+					onChange={(terminalApp) => patch({ terminalApp })}
+				/>
+				<FinderIntegrationRow />
+			</SettingsGroup>
 			<PrivacySettingsBlock settings={settings} patch={patch} />
 		</>
 	);
