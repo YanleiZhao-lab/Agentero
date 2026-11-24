@@ -47,6 +47,7 @@ import { usePdfLinkUrlTip } from "@/components/viewer/pdf/hooks/use-pdf-link-url
 import { usePdfPaperTone } from "@/components/viewer/pdf/hooks/use-pdf-paper-tone";
 import { usePdfReadingMode } from "@/components/viewer/pdf/hooks/use-pdf-reading-mode";
 import { usePdfScrollSync } from "@/components/viewer/pdf/hooks/use-pdf-scroll-sync";
+import { useSentenceGlyphRects } from "@/components/viewer/pdf/hooks/use-pdf-sentence-glyph-rects";
 import { usePdfZoomControls } from "@/components/viewer/pdf/hooks/use-pdf-zoom-controls";
 import { useReflowDisplayDocument } from "@/components/viewer/pdf/hooks/use-reflow-display-document";
 import { getLinkDestination } from "@/components/viewer/pdf/layers/citation-links";
@@ -74,6 +75,7 @@ import { PdfHistoryKeyHandler } from "@/components/viewer/pdf/viewport/pdf-histo
 import { PdfScroller } from "@/components/viewer/pdf/viewport/pdf-scroller";
 import { PdfVimKeyHandler } from "@/components/viewer/pdf/viewport/pdf-vim-key-handler";
 import { WheelZoomHandler } from "@/components/viewer/pdf/viewport/wheel-zoom-handler";
+import { useSettings } from "@/hooks/use-app-stores";
 import { backgroundTasksStore } from "@/lib/core/background-tasks";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { sameRelPaperPath } from "@/lib/core/path";
@@ -142,6 +144,7 @@ const EMPTY_HANDLERS: PdfPageHandlers = {
 	onEditHighlightAnnotation: NOOP,
 	onChangeHighlightColor: NOOP,
 	onOpenComment: NOOP,
+	onLeavePin: NOOP,
 	onSaveComment: NOOP,
 	onCancelComment: NOOP,
 	onDeleteComment: NOOP,
@@ -174,6 +177,7 @@ export function PdfTranslationViewerInner({
 	onHighlightsChange,
 	onOpenSettings,
 }: PdfViewerInnerProps) {
+	const pdfSentenceHover = useSettings((s) => s.pdfSentenceHover);
 	usePdfScrollSync(docId);
 	usePdfReadingMode(docId);
 	const { provides: scroll } = useScroll(docId);
@@ -234,6 +238,11 @@ export function PdfTranslationViewerInner({
 	});
 
 	useEffect(() => {
+		if (!pdfSentenceHover) {
+			publishLayoutSentenceCatalog(docId, []);
+			publishLayoutSentencePageAnalysis(docId, []);
+			return;
+		}
 		const rawRegions = layoutRawRegions ?? [];
 		publishLayoutSentencePageAnalysis(
 			docId,
@@ -259,14 +268,16 @@ export function PdfTranslationViewerInner({
 				})),
 			}));
 		publishLayoutSentenceCatalog(docId, [...source, ...translated]);
-	}, [docId, layoutTranslateItemsByPage, layoutRawRegions]);
+	}, [docId, layoutTranslateItemsByPage, layoutRawRegions, pdfSentenceHover]);
 	useEffect(() => {
 		return () => {
 			publishLayoutSentenceCatalog(docId, []);
 			publishLayoutSentencePageAnalysis(docId, []);
 		};
 	}, [docId]);
-	usePdfSentenceInteraction(docId, hostRef);
+	usePdfSentenceInteraction(docId, hostRef, undefined, {
+		enabled: pdfSentenceHover,
+	});
 	const { provides: annotationCap } = useAnnotationCapability();
 	const onHighlightsChangeRef = useRef(onHighlightsChange);
 	onHighlightsChangeRef.current = onHighlightsChange;
@@ -275,6 +286,7 @@ export function PdfTranslationViewerInner({
 		docCap,
 		docId,
 		paperAbsPath,
+		vaultPath,
 		paperKey,
 		totalPages: docCap?.getDocument(docId)?.pages.length ?? 0,
 		onHighlightsChangeRef,
@@ -291,6 +303,7 @@ export function PdfTranslationViewerInner({
 		paperRelPath,
 		paperAbsPath,
 		highlights,
+		sentenceSelection: pdfSentenceHover,
 	});
 	const { selectionMenu, actions, ask, translation } = selection;
 	const [translationBounds, setTranslationBounds] = useState<DOMRectReadOnly>();
@@ -298,6 +311,15 @@ export function PdfTranslationViewerInner({
 		() => partitionHighlightPaint(highlights.highlights),
 		[highlights.highlights],
 	);
+	// English glyph boxes, same as the source pane. A word or half-sentence
+	// highlight only finds its sentence by overlap; quote text misses it.
+	const sentenceRectsByItemId = useSentenceGlyphRects({
+		engine,
+		docCapRef,
+		docId,
+		itemsByPage: layoutTranslateItemsByPage,
+		highlightQuotesByPage: highlightPaint.quotesByPage,
+	});
 
 	const reflowDisplayDocument = useReflowDisplayDocument(
 		docCap,
@@ -472,6 +494,7 @@ export function PdfTranslationViewerInner({
 			layoutTranslatePageStateByPage,
 			linkInkByKey,
 			glyphRunsByPage,
+			sentenceRectsByItemId,
 		}),
 		[
 			rawRegionsByPage,
@@ -479,6 +502,7 @@ export function PdfTranslationViewerInner({
 			layoutTranslatePageStateByPage,
 			linkInkByKey,
 			glyphRunsByPage,
+			sentenceRectsByItemId,
 		],
 	);
 
@@ -766,6 +790,7 @@ export function PdfTranslationViewerInner({
 		<div
 			ref={hostRef}
 			data-pdf-root
+			data-sentence-hover={pdfSentenceHover ? undefined : "off"}
 			className="content-arrive relative flex h-full min-h-0 w-full select-none flex-col"
 		>
 			<DockviewViewport

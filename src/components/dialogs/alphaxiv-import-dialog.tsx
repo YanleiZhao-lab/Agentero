@@ -3,7 +3,7 @@
  */
 
 import { Check, Import, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlphaXivFolderIcon } from "@/components/dialogs/alphaxiv-folder-icon";
 import { AlphaXivIcon } from "@/components/icons/paper-service-icons";
@@ -26,9 +26,9 @@ import type { AlphaXivFolder, AlphaXivFolderPaper } from "@/lib/core/bindings";
 import { commands } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { type ApiError, callApi } from "@/lib/core/ipc";
-import { notifyError } from "@/lib/core/notify";
+import { notifyError, notifySuccess, notifyWarning } from "@/lib/core/notify";
 import { hasSecret } from "@/lib/core/secret-mask";
-import { isTauri } from "@/lib/core/tauri";
+import { isMobileApp, isTauri } from "@/lib/core/tauri";
 import {
 	type AlphaXivImportPlanItem,
 	type AlphaXivImportSource,
@@ -43,6 +43,8 @@ import {
 import { libraryStore } from "@/lib/paper/library-store";
 import { loadSettings } from "@/lib/settings";
 import { openSettingsWindow } from "@/lib/shell/settings-window";
+import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
+import { getVaultPath } from "@/lib/vault/store";
 import { openPaper } from "@/lib/workspace/actions";
 
 type FolderNode = { folder: AlphaXivFolder; depth: number };
@@ -142,6 +144,7 @@ function selectedSources(
 		folder.papers.forEach((paper, index) => {
 			if (!selected.has(rowKey(folder.id, paper, index))) return;
 			rows.push({
+				paperGroupId: paper.paperGroupId,
 				folderName: folderTitle(folder, language),
 				arxivId: paper.arxivId,
 				pdfUrl: paper.pdfUrl,
@@ -224,11 +227,14 @@ export function AlphaXivImportDialog({
 	open,
 	onOpenChange,
 	vaultPath,
+	parentDir = null,
 	onDone,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	vaultPath: string | null;
+	/** Folder captured when the dialog opened. Null keeps the lookup default. */
+	parentDir?: string | null;
 	onDone: () => void;
 }) {
 	const { t, i18n: translation } = useTranslation("sidebar");
@@ -245,8 +251,10 @@ export function AlphaXivImportDialog({
 	const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
 	const [query, setQuery] = useState("");
 	const [tagFolders, setTagFolders] = useState(true);
+	const [importNotes, setImportNotes] = useState(false);
+	const [importing, setImporting] = useState(false);
+	const canImportNotes = !isMobileApp() && !isRemoteVaultHandle(vaultPath);
 	const [reloadToken, setReloadToken] = useState(0);
-	const importStarted = useRef(false);
 
 	useOverlayRegistration("alphaxiv-import", open, () => {
 		onOpenChange(false);
@@ -261,6 +269,7 @@ export function AlphaXivImportDialog({
 		setNeedsKey(false);
 		setQuery("");
 		setTagFolders(true);
+		setImportNotes(false);
 		setSelected(new Set());
 		setActiveFolderId(null);
 		if (!isTauri()) {
@@ -332,14 +341,12 @@ export function AlphaXivImportDialog({
 	const plan: AlphaXivImportPlanItem[] = useMemo(
 		() =>
 			planAlphaXivImport(
-				selectedSources(folders, selected, translation.language),
+				selectedSources(folders, selected, translation.language).filter(
+					(row) => importNotes || !inVault.has(arxivMatchKey(row.arxivId)),
+				),
 			),
-		[folders, selected, translation.language],
+		[folders, selected, translation.language, importNotes, inVault],
 	);
-
-	const handleOpenChange = (next: boolean) => {
-		onOpenChange(next);
-	};
 
 	const togglePaper = (key: string) => {
 		setSelected((prev) => {
@@ -354,7 +361,11 @@ export function AlphaXivImportDialog({
 		setSelected((prev) => {
 			const next = new Set(prev);
 			folder.papers.forEach((paper, index) => {
-				if (!paper.importable || alreadyInLibrary(paper, inVault)) return;
+				if (
+					!paper.importable ||
+					(on && !importNotes && alreadyInLibrary(paper, inVault))
+				)
+					return;
 				const key = rowKey(folder.id, paper, index);
 				if (on) next.add(key);
 				else next.delete(key);
@@ -364,28 +375,50 @@ export function AlphaXivImportDialog({
 	};
 
 	const runImport = () => {
-		if (!vaultPath || plan.length === 0 || importStarted.current) return;
-		importStarted.current = true;
-		const items = plan;
-		const withTags = tagFolders;
-		// The lookup job shows in the bottom-left task panel, so the dialog
-		// does not stay open for a summary.
+		if (!vaultPath || plan.length === 0 || importing) return;
+		setImporting(true);
+		// Read the captured folder before closing. Closing clears the store,
+		// and a later browse must not retarget this import.
+		const destination = parentDir?.trim() || undefined;
 		onOpenChange(false);
-		void importAlphaXivPlan(items, { tagFolders: withTags })
+		void importAlphaXivPlan(plan, {
+			tagFolders,
+			importNotes,
+			parentDir: destination,
+		})
 			.then((result) => {
 				onDone();
-				if (result.revealDir) openPaper(result.revealDir);
+				if (result.notes) {
+					const { added, existing, excerpts, failures } = result.notes;
+					const text = t("alphaxivImport.notesSummary", {
+						added,
+						existing,
+						excerpts,
+						failed: failures.length,
+					});
+					if (failures.length) {
+						notifyWarning(text, {
+							description: `${failures[0].title}: ${failures[0].message}`,
+							duration: 10000,
+						});
+					} else {
+						notifySuccess(text);
+					}
+				}
+				if (result.revealDir && getVaultPath() === vaultPath) {
+					openPaper(result.revealDir);
+				}
 			})
 			.catch((importError: unknown) => {
 				notifyError(errorText(importError));
 			})
 			.finally(() => {
-				importStarted.current = false;
+				setImporting(false);
 			});
 	};
 
 	return (
-		<Dialog open={open} onOpenChange={handleOpenChange}>
+		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent
 				className="flex max-h-[85vh] flex-col sm:max-w-3xl"
 				aria-describedby={undefined}
@@ -497,8 +530,9 @@ export function AlphaXivImportDialog({
 														key={key}
 														className="flex w-full min-w-0 items-start gap-2 rounded px-1.5 py-1 hover:bg-accent/60"
 													>
-														{paper.importable && !inLibrary ? (
+														{paper.importable && (!inLibrary || importNotes) ? (
 															<Checkbox
+																aria-label={paper.title || paper.arxivId}
 																className="mt-0.5"
 																checked={selected.has(key)}
 																onCheckedChange={() => togglePaper(key)}
@@ -553,22 +587,38 @@ export function AlphaXivImportDialog({
 					{needsKey || (!loading && folders.length === 0) ? (
 						<span />
 					) : (
-						<label
-							htmlFor="alphaxiv-tag-folders"
-							className={
-								loading
-									? "pointer-events-none flex items-center gap-2 text-sm"
-									: "flex items-center gap-2 text-sm"
-							}
-						>
-							<Checkbox
-								id="alphaxiv-tag-folders"
-								checked={tagFolders}
-								disabled={loading}
-								onCheckedChange={(value) => setTagFolders(value === true)}
-							/>
-							{t("alphaxivImport.tagFolders")}
-						</label>
+						<div className="flex flex-col gap-2">
+							<label
+								htmlFor="alphaxiv-tag-folders"
+								className={
+									loading
+										? "pointer-events-none flex items-center gap-2 text-sm"
+										: "flex items-center gap-2 text-sm"
+								}
+							>
+								<Checkbox
+									id="alphaxiv-tag-folders"
+									checked={tagFolders}
+									disabled={loading}
+									onCheckedChange={(value) => setTagFolders(value === true)}
+								/>
+								{t("alphaxivImport.tagFolders")}
+							</label>
+							{canImportNotes ? (
+								<label
+									htmlFor="alphaxiv-import-notes"
+									className="flex items-center gap-2 text-sm"
+								>
+									<Checkbox
+										id="alphaxiv-import-notes"
+										checked={importNotes}
+										disabled={loading}
+										onCheckedChange={(value) => setImportNotes(value === true)}
+									/>
+									{t("alphaxivImport.importNotes")}
+								</label>
+							) : null}
+						</div>
 					)}
 					<div className="ml-auto flex items-center gap-2">
 						{loading ? (
@@ -605,18 +655,20 @@ export function AlphaXivImportDialog({
 								<Button
 									type="button"
 									variant="ghost"
-									onClick={() => handleOpenChange(false)}
+									onClick={() => onOpenChange(false)}
 								>
 									{t("alphaxivImport.cancel")}
 								</Button>
 								<Button
 									type="button"
 									className="gap-1.5"
-									disabled={plan.length === 0 || !vaultPath}
+									disabled={importing || plan.length === 0 || !vaultPath}
 									onClick={runImport}
 								>
 									<Import className="size-3.5" />
-									{t("alphaxivImport.import")}
+									{importing
+										? t("alphaxivImport.importing")
+										: t("alphaxivImport.import")}
 								</Button>
 							</>
 						)}

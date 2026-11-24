@@ -386,6 +386,14 @@
 			"always": "始终显示",
 			"hidden": "隐藏"
 		},
+		"pdfSentenceHover": {
+			"label": "句子悬停高亮"
+		},
+		"pdfCommentDisplay": {
+			"label": "PDF 批注显示",
+			"rail": "右侧卡片",
+			"gutter": "悬停图标"
+		},
 		"fonts": {
 			"section": "字体",
 			"interface": "界面字体",

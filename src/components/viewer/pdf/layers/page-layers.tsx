@@ -152,6 +152,8 @@ import {
 } from "@/lib/pdf/page-theme";
 import type { PdfNavigationRegion } from "@/lib/pdf/pending-pdf-page";
 import type { SelectionPin } from "@/lib/pdf/selection";
+import { citationLinksForTranslation } from "@/lib/pdf/text-reference-link";
+import type { PdfCommentDisplay } from "@/lib/settings";
 
 /**
  * Paint unrotated PDF-point layers (highlights, selection tint) in the same
@@ -463,6 +465,8 @@ export type PdfPageModeSlice = {
 	plainViewer?: boolean;
 	/** Narrow embeds show active comment cards inside the page. */
 	insetCommentCards?: boolean;
+	/** `gutter` replaces the comment rail with a pin per note. */
+	commentDisplay?: PdfCommentDisplay;
 	/** Dual-pane translation page paints the shared sentence wash. */
 	sentencePairing?: boolean;
 };
@@ -497,6 +501,8 @@ export type PdfPageHandlers = {
 	) => void;
 	/** Start in-place edit on a comment-rail card. */
 	onOpenComment: (comment: PageAnnotationComment) => void;
+	/** Pointer left a gutter pin; a note pin also hides its preview card. */
+	onLeavePin: (pin: SelectionPin) => void;
 	/** Commit in-place edit on a comment-rail card. */
 	onSaveComment: (comment: PageAnnotationComment, text: string) => void;
 	/** Discard in-place edit (Escape). */
@@ -818,6 +824,11 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 				? pins.map((pin) => selectionPinForVisibleTranslation(pin, true))
 				: pins,
 		[pins, translationVisible],
+	);
+	// Gutter comment cards open from these, so they share the pins' placement.
+	const annotatePins = useMemo(
+		() => shownPins.filter((pin) => pin.kind === "annotate"),
+		[shownPins],
 	);
 	const askHighlights = useMemo(() => {
 		const paints: { id: string; rects: readonly PdfAskNormalizedRect[] }[] = [];
@@ -1144,7 +1155,9 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 			const color = ink?.get(key);
 			return color ? { ...box, color } : box;
 		};
-		for (const link of marks.citationLinks.get(pageIndex) ?? []) {
+		for (const link of citationLinksForTranslation(
+			marks.citationLinks.get(pageIndex) ?? [],
+		)) {
 			const url = linkAnnotationUri(link);
 			boxes.push(
 				withInk(
@@ -1732,7 +1745,7 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 						activeId={marks.activeCardId}
 						onOpen={handlers.onOpenPin}
 						onEnter={handlers.onCardHoverEnter}
-						onLeave={handlers.onCardHoverLeave}
+						onLeave={handlers.onLeavePin}
 					/>
 				) : null}
 				{/*
@@ -1838,6 +1851,8 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 					<CommentCardsLayer
 						items={shownComments}
 						inset={mode.insetCommentCards}
+						display={mode.commentDisplay}
+						annotatePins={annotatePins}
 						pageWidthPx={width}
 						pageHeightPx={height}
 						editingId={marks.editingCommentId}

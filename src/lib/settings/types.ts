@@ -135,6 +135,25 @@ export function isPdfTranslateTabMode(v: unknown): v is PdfTranslateTabMode {
 	);
 }
 
+/**
+ * Where PDF annotation notes show. `rail` stacks comment cards beside the
+ * page; `gutter` drops the cards and gives each note a small pin instead, which
+ * previews the note on hover and edits it in place.
+ */
+export type PdfCommentDisplay = "rail" | "gutter";
+
+export const PDF_COMMENT_DISPLAY_MODES: readonly PdfCommentDisplay[] = [
+	"rail",
+	"gutter",
+] as const;
+
+export function isPdfCommentDisplay(v: unknown): v is PdfCommentDisplay {
+	return (
+		typeof v === "string" &&
+		(PDF_COMMENT_DISPLAY_MODES as readonly string[]).includes(v)
+	);
+}
+
 export const PDF_SPREAD_MODES: readonly PdfSpreadMode[] = [
 	"none",
 	"odd",
@@ -253,6 +272,17 @@ export type AppSettings = {
 	 * Hidden keeps the toolbar, command palette, and shortcut.
 	 */
 	pdfTranslateTab: PdfTranslateTabMode;
+	/**
+	 * Sentence wash while the pointer is over body text, and whole-sentence
+	 * selection on double-click. Off clears the wash and selects one word.
+	 * Default on. The writing preview keeps its SyncTeX line hint either way.
+	 */
+	pdfSentenceHover: boolean;
+	/**
+	 * PDF annotation notes: beside the page (`rail`, default) or as a small pin
+	 * per note that previews on hover (`gutter`).
+	 */
+	pdfCommentDisplay: PdfCommentDisplay;
 	/**
 	 * How NOTES.md is initialized on paper import. `custom` copies the vault
 	 * template `.agentero/templates/NOTES.md`. Default: built-in skeleton.

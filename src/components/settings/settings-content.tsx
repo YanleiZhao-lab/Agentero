@@ -569,6 +569,8 @@ export function SettingsContent({
 									pdfVimKeys={settings.pdfVimKeys}
 									pdfSpreadMode={settings.pdfSpreadMode}
 									pdfTranslateTab={settings.pdfTranslateTab}
+									pdfSentenceHover={settings.pdfSentenceHover}
+									pdfCommentDisplay={settings.pdfCommentDisplay}
 									vimMode={settings.vimMode}
 									patch={patch}
 								/>

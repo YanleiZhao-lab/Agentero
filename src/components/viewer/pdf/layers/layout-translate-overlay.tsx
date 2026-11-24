@@ -40,6 +40,10 @@ import { isLayoutTranslateItemPainted } from "@/lib/pdf/layout/layout-translate-
 import { linkColorOnPaper } from "@/lib/pdf/layout/link-ink";
 import type { LayoutSourceStyle } from "@/lib/pdf/layout/source-style";
 import {
+	activateTranslatedLinkClick,
+	rememberTranslatedLinkOrigin,
+} from "@/lib/pdf/layout/translated-link-gesture";
+import {
 	assignmentsWithin,
 	assignPreservedLinks,
 	claimTranslateLinks,
@@ -642,11 +646,17 @@ function LinkifiedText({
 				className="select-text"
 				style={linkInkStyle(part.assignment.color, tone)}
 				onDragStart={(event) => event.preventDefault()}
+				onPointerDown={(event) => {
+					if (event.button !== 0) return;
+					rememberTranslatedLinkOrigin(event.currentTarget, {
+						x: event.clientX,
+						y: event.clientY,
+					});
+				}}
 				onClick={(event) => {
-					event.preventDefault();
-					event.stopPropagation();
-					if (window.getSelection()?.toString()) return;
-					onOpenLink?.(part.assignment);
+					activateTranslatedLinkClick(event, () => {
+						onOpenLink?.(part.assignment);
+					});
 				}}
 				onPointerEnter={(event) => {
 					if (linkHoverSuppressed(event.buttons)) return;
@@ -799,6 +809,7 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
 								{index > 0 ? sentenceNodes.gap : null}
 								<span
 									data-sentence={node.index}
+									data-highlight-id={tint?.highlightId}
 									className={cn(tint?.shape !== "underline" && "rounded-[1px]")}
 									style={
 										tint
