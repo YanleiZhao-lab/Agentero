@@ -10,10 +10,10 @@ import {
 } from "lucide-react";
 import { type TouchEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import agenteroLogo from "@/assets/agentero-logo.svg";
 import { Button } from "@/components/ui/button";
 import type { BridgeClientStatus } from "@/lib/bridge/client";
 import { bridgeDisconnect } from "@/lib/bridge/client";
+import { APP_SHORT_NAME, APP_ICON as agenteroLogo } from "@/lib/core/branding";
 import { cn } from "@/lib/core/utils";
 
 export function MobileSidebar({
@@ -98,7 +98,7 @@ export function MobileSidebar({
 				<header className="flex h-16 shrink-0 items-center justify-between border-b px-4">
 					<div className="flex items-center gap-2">
 						<img src={agenteroLogo} alt="" className="size-8" />
-						<span className="font-semibold text-base">Agentero</span>
+						<span className="font-semibold text-base">{APP_SHORT_NAME}</span>
 					</div>
 					<Button
 						type="button"

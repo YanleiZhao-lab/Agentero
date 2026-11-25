@@ -11,14 +11,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import {
-	basename,
-	dirname,
-	isAbsolute,
-	join,
-	relative,
-	resolve,
-} from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -123,6 +116,15 @@ function config() {
 			throw new Error(`Invalid ${name}`);
 		}
 	}
+	for (const name of ["displayName", "shortName"]) {
+		if (
+			typeof value[name] !== "string" ||
+			!value[name].trim() ||
+			/["$\\/\r\n]/.test(value[name])
+		) {
+			throw new Error(`Invalid ${name}`);
+		}
+	}
 	if (value.branch !== "research/stable") {
 		throw new Error("This channel only promotes research/stable");
 	}
@@ -183,7 +185,11 @@ async function previousRelease(channel) {
 	) {
 		throw new Error("Previous release belongs to another update channel");
 	}
-	return metadata;
+	return {
+		...metadata,
+		changelog_url: release.assets.find((item) => item.name === "changelog.json")
+			?.browser_download_url,
+	};
 }
 
 export function unchangedInputs(previous, sourceSha, upstreamSha) {
@@ -313,6 +319,26 @@ async function prepare() {
 	git(["switch", "-c", candidateBranch]);
 	integrateStable(ROOT, upstreamRef);
 	const candidateSha = git(["rev-parse", "HEAD"]);
+	let previousReleases = [];
+	if (previous?.changelog_url) {
+		const response = await fetch(previous.changelog_url, {
+			signal: AbortSignal.timeout(60000),
+		});
+		if (!response.ok) {
+			throw new Error(`Cannot read channel history: HTTP ${response.status}`);
+		}
+		const history = await response.json();
+		if (
+			history.schemaVersion !== 1 ||
+			!Array.isArray(history.releases) ||
+			history.releases[0]?.tag !== previous.tag
+		) {
+			throw new Error(
+				"Published changelog does not match the previous release",
+			);
+		}
+		previousReleases = history.releases;
+	}
 	const state = {
 		channel: "research",
 		repository: channel.repository,
@@ -325,6 +351,7 @@ async function prepare() {
 		upstream_tag: upstreamTag,
 		upstream_sha: upstreamSha,
 		upstream_repository: channel.upstreamRepository,
+		previous_releases: previousReleases,
 		run_url: `https://github.com/${channel.repository}/actions/runs/${runId}`,
 	};
 	writeJson(statePath, state);
@@ -463,6 +490,18 @@ function configure() {
 		stampIosVersions(readFileSync(iosPath, "utf8"), state.version),
 	);
 	const path = required("RESEARCH_TAURI_CONFIG");
+	const hooks = join(dirname(path), "agenteroz-hooks.nsh");
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(
+		hooks,
+		`!define AGENTERO_DISPLAY_NAME "${channel.displayName}"\n` +
+			`!include "${join(ROOT, "src-tauri/nsis/hooks.nsh").replaceAll("\\", "/")}"\n`,
+	);
+	overlay.bundle.windows = { nsis: { installerHooks: hooks } };
+	writeJson(
+		join(ROOT, "src/lib/update/changelog.json"),
+		channelChangelog(state),
+	);
 	writeJson(path, overlay);
 	if (process.env.GITHUB_ENV) {
 		appendFileSync(
@@ -471,6 +510,46 @@ function configure() {
 		);
 	}
 	output("config_path", path.replaceAll("\\", "/"));
+}
+
+export function channelChangelog(state) {
+	const channel = config();
+	const summaries = {};
+	for (const locale of ["zh-CN", "en"]) {
+		const custom = readJson(
+			join(ROOT, `src/i18n/locales/${locale}/settings.json`),
+		).about.custom;
+		const heading = locale === "zh-CN" ? "### 定制功能" : "### Custom features";
+		summaries[locale] =
+			`${channel.displayName} · ${state.upstream_tag}\n\n${heading}\n\n` +
+			[custom.notes, custom.skills, custom.updates]
+				.map((feature) => `- ${feature}`)
+				.join("\n");
+	}
+	const bundled = readJson(join(ROOT, "src/lib/update/changelog.json"));
+	const history = new Map();
+	for (const release of [
+		...(state.previous_releases ?? []),
+		...bundled.releases,
+	]) {
+		if (release.tag !== state.tag && !history.has(release.tag)) {
+			history.set(release.tag, release);
+		}
+	}
+	const olderReleases = [...history.values()].sort((left, right) =>
+		isNewerVersion(left.tag.slice(1), right.tag.slice(1)) ? -1 : 1,
+	);
+	return {
+		schemaVersion: 1,
+		releases: [
+			{
+				tag: state.tag,
+				releaseDate: new Date().toISOString().slice(0, 10),
+				summary: summaries,
+			},
+			...olderReleases,
+		],
+	};
 }
 
 function sha256(path) {
@@ -494,7 +573,10 @@ export function updaterManifest(state, installer, signature, date) {
 	}
 	return {
 		version: state.version,
-		notes: `Research channel based on ${state.upstream_tag}; paper-note document selection is included.`,
+		notes:
+			`${config().displayName} · ${state.upstream_tag}\n\n` +
+			"论文笔记文档选择与记忆、科研阅读技能、Fork 签名更新。\n" +
+			"Paper-note selection and memory, research skills, and signed Fork updates.",
 		pub_date: date,
 		platforms: {
 			"windows-x86_64": {
@@ -517,11 +599,11 @@ function packageArtifacts() {
 	}
 	const installer = insideRoot(resolve(installers[0]));
 	const signaturePath = insideRoot(`${installer}.sig`);
+	const installerName = `${config().shortName}_${state.version}_x64-setup.exe`;
 	const delivery = required("RESEARCH_DELIVERY");
 	mkdirSync(delivery, { recursive: true });
-	for (const path of [installer, signaturePath]) {
-		copyFileSync(path, join(delivery, basename(path)));
-	}
+	copyFileSync(installer, join(delivery, installerName));
+	copyFileSync(signaturePath, join(delivery, `${installerName}.sig`));
 	const cliBinary = insideRoot(join(ROOT, "target/release/agentero-cli.exe"));
 	const cliVersion = command(cliBinary, ["--version"]);
 	if (!cliVersion.endsWith(` ${state.version}`)) {
@@ -562,14 +644,13 @@ function packageArtifacts() {
 	const signature = readFileSync(signaturePath, "utf8").trim();
 	writeJson(
 		join(delivery, "latest.json"),
-		updaterManifest(
-			state,
-			basename(installer),
-			signature,
-			new Date().toISOString(),
-		),
+		updaterManifest(state, installerName, signature, new Date().toISOString()),
 	);
 	writeJson(join(delivery, "channel.json"), state);
+	copyFileSync(
+		join(ROOT, "src/lib/update/changelog.json"),
+		join(delivery, "changelog.json"),
+	);
 	const names = readdirSync(delivery).sort();
 	writeFileSync(
 		join(delivery, "SHA256SUMS"),
@@ -620,6 +701,7 @@ export function validateDelivery(delivery, state) {
 		`agentero-cli-${state.version}-x86_64-pc-windows-msvc.zip`,
 		`agentero-cli-${state.version}-x86_64-pc-windows-msvc.zip.sha256`,
 		"channel.json",
+		"changelog.json",
 		"latest.json",
 	].sort();
 	const sumLines = readFileSync(join(delivery, "SHA256SUMS"), "utf8")
@@ -647,6 +729,15 @@ export function validateDelivery(delivery, state) {
 	const cliSum = readFileSync(join(delivery, `${cliArchive}.sha256`), "utf8");
 	if (cliSum !== `${sha256(join(delivery, cliArchive))}  ${cliArchive}\n`) {
 		throw new Error("Standalone CLI checksum does not match its archive");
+	}
+	const changelog = readJson(join(delivery, "changelog.json"));
+	if (
+		changelog.schemaVersion !== 1 ||
+		changelog.releases?.[0]?.tag !== state.tag ||
+		!changelog.releases[0].summary?.["zh-CN"]?.trim() ||
+		!changelog.releases[0].summary?.en?.trim()
+	) {
+		throw new Error("Channel changelog does not describe this release");
 	}
 	return join(delivery, installer);
 }
@@ -731,16 +822,20 @@ async function publish() {
 	const notes = join(dirname(delivery), "research-release-notes.md");
 	writeFileSync(
 		notes,
-		`## 概要\n\nWindows x64 科研定制版 ${state.version}，基于上游 ` +
+		`## 概要\n\n${channel.displayName} ${state.version}（Windows x64），基于上游 ` +
 			`[${state.upstream_tag}](https://github.com/${state.upstream_repository}/releases/tag/${state.upstream_tag})。\n\n` +
 			"- 论文笔记栏支持选择文档，并按论文记住上次选择。\n" +
+			"- 整合深度研究、论文精读与学术写作技能。\n" +
+			"- 统一定制名称、书页声波图标和 Fork 项目与反馈入口。\n" +
 			"- 后续更新通过本 Fork 的独立签名更新渠道安装。\n" +
 			"- 首次从官方渠道迁移时，下载安装本页 setup 可执行文件一次；沿用原应用标识和现有用户配置。\n\n" +
 			"更新签名独立于 Windows Authenticode；安装包未附带 Windows 发布者签名。\n\n" +
 			`定制源码：[${state.source_sha}](https://github.com/${state.repository}/commit/${state.source_sha})。\n\n` +
-			`---\n\n## Summary\n\nWindows x64 Research build ${state.version}, based on upstream ` +
+			`---\n\n## Summary\n\n${channel.displayName} ${state.version} (Windows x64), based on upstream ` +
 			`[${state.upstream_tag}](https://github.com/${state.upstream_repository}/releases/tag/${state.upstream_tag}).\n\n` +
 			"- The paper-note pane supports document selection and remembers the last selection per paper.\n" +
+			"- Integrated deep research, close paper reading and academic writing skills.\n" +
+			"- Custom branding, a book-and-wave icon, and project and feedback links to this Fork.\n" +
 			"- Subsequent updates use this Fork's independently signed update channel.\n" +
 			"- To migrate from the official channel, install this page's setup executable once; the original application identifier and existing user configuration are retained.\n\n" +
 			"The updater signature is independent of Windows Authenticode; the installer has no Windows publisher signature.\n\n" +
@@ -757,7 +852,7 @@ async function publish() {
 		state.source_sha,
 		"--draft",
 		"--title",
-		`Agentero Research ${state.version}`,
+		`${channel.displayName} ${state.version}`,
 		"--notes-file",
 		notes,
 		...files,
@@ -793,7 +888,7 @@ async function publish() {
 	if (process.env.GITHUB_STEP_SUMMARY) {
 		appendFileSync(
 			process.env.GITHUB_STEP_SUMMARY,
-			`## Published Agentero Research ${state.version}\n\n` +
+			`## Published ${channel.displayName} ${state.version}\n\n` +
 				`[Signed Windows installer](https://github.com/${channel.repository}/releases/tag/${state.tag})\n\n` +
 				`Upstream ${state.upstream_tag}; source \`${state.source_sha}\`.\n`,
 		);

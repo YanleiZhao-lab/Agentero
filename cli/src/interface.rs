@@ -1,5 +1,6 @@
 //! The user-facing command catalog drives clap, machine help and the CLI adapter.
 use crate::error::CliError;
+use agentero_core::release::RELEASE_REPO;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -151,7 +152,7 @@ fn build(op: &Operation, chinese: bool) -> Command {
         .disable_help_subcommand(true);
     if op.path.is_empty() {
         cmd = cmd.version(env!("CARGO_PKG_VERSION"))
-            .after_long_help(format!("Examples:\n  {}\n\nDocs: https://agentero-docs.poco-ai.com\nFeedback: https://github.com/poco-ai/Agentero/issues",op.example.replace('\n',"\n  ")));
+            .after_long_help(format!("Examples:\n  {}\n\nDocs: https://agentero-docs.poco-ai.com\nFeedback: https://github.com/{RELEASE_REPO}/issues",op.example.replace('\n',"\n  ")));
     }
     for param in &op.args {
         let mut arg = Arg::new(param.name)

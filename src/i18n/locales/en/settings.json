@@ -1089,7 +1089,15 @@
 	},
 	"about": {
 		"title": "About",
-		"starGithub": "Star us on GitHub",
+		"starGithub": "View AgenteroZ on GitHub",
+		"custom": {
+			"title": "Custom features",
+			"notes": "Choose an analysis or another note document in the paper-note pane, with the last choice remembered per paper.",
+			"skills": "Integrated deep research, close paper reading and academic writing skills support reading, analysis and research.",
+			"updates": "Scheduled upstream stable-release integration and this Fork's signed updates keep the custom features.",
+			"feedback": "AgenteroZ feedback",
+			"upstream": "Built on Agentero · Thanks to the upstream authors"
+		},
 		"version": "Version {{version}}",
 		"logs": {
 			"label": "Logs",

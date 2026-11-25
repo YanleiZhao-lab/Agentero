@@ -3,7 +3,6 @@ import { Camera, Keyboard, Laptop, LoaderCircle, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import agenteroLogo from "@/assets/agentero-logo.svg";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
@@ -19,6 +18,7 @@ import {
 	listenBridgeProgress,
 	type PairPendingEvent,
 } from "@/lib/bridge/client";
+import { APP_SHORT_NAME, APP_ICON as agenteroLogo } from "@/lib/core/branding";
 
 function isAndroid(): boolean {
 	return /Android/i.test(navigator.userAgent);
@@ -139,7 +139,7 @@ export function MobilePairing({
 	return (
 		<div className="mobile-shell flex h-dvh min-h-0 w-full select-none flex-col overflow-hidden bg-background px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-8 sm:px-8 md:mx-auto md:max-w-md">
 			<div className="flex flex-1 flex-col items-center justify-center">
-				<img src={agenteroLogo} alt="Agentero" className="size-28" />
+				<img src={agenteroLogo} alt={APP_SHORT_NAME} className="size-28" />
 				<h1 className="mt-6 font-semibold text-2xl">{t("connect.title")}</h1>
 				<div className="mt-10 w-full space-y-3">
 					<Button

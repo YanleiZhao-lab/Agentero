@@ -4,7 +4,7 @@
  */
 
 import { toPng } from "html-to-image";
-import agenteroAppIconUrl from "@/assets/agentero-app-icon.svg";
+import { APP_ICON as agenteroAppIconUrl } from "@/lib/core/branding";
 
 const PNG_PIXEL_RATIO = 2;
 

@@ -1,5 +1,5 @@
 {
-	"title": "欢迎使用 Agentero",
+	"title": "欢迎使用 {{appName}}",
 	"subtitle": "在这里，你和 AI 助手一起读论文、记笔记。接下来几步，帮你把工作台调成顺手的样子。",
 	"recommended": "推荐",
 	"steps": {

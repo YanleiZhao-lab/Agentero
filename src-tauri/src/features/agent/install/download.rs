@@ -5,6 +5,7 @@
 
 use crate::core::error::AppError;
 use crate::core::http;
+use crate::core::release::RELEASE_REPO;
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -12,12 +13,6 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 use tar::Archive;
-
-/// GitHub org/repo that publishes CLI archives (stable public CDN URLs).
-pub const RELEASE_REPO: &str = match option_env!("AGENTERO_RELEASE_REPO") {
-    Some(repository) => repository,
-    None => "poco-ai/Agentero",
-};
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 

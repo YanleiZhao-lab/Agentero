@@ -1,4 +1,6 @@
 {
+	"displayName": "AgenteroZ 定制自用版",
+	"shortName": "AgenteroZ",
 	"repository": "YanleiZhao-lab/Agentero",
 	"upstreamRepository": "poco-ai/Agentero",
 	"branch": "research/stable",

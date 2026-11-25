@@ -1089,7 +1089,15 @@
 	},
 	"about": {
 		"title": "关于",
-		"starGithub": "Star us on GitHub",
+		"starGithub": "在 GitHub 上查看 AgenteroZ",
+		"custom": {
+			"title": "定制功能",
+			"notes": "在论文笔记栏选择解析或其他笔记文档，按论文记住上次选择。",
+			"skills": "整合深度研究、论文精读与学术写作技能，辅助阅读、分析和研究。",
+			"updates": "定时跟进上游稳定版，通过本 Fork 的签名更新渠道获取保留定制功能的版本。",
+			"feedback": "向 AgenteroZ 反馈",
+			"upstream": "基于 Agentero · 感谢上游作者"
+		},
 		"version": "版本 {{version}}",
 		"logs": {
 			"label": "运行日志",

@@ -1,3 +1,4 @@
+use crate::core::release::RELEASE_REPO;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -6,9 +7,6 @@ use tauri::{Manager, ResourceId, Runtime, Webview};
 use tauri_plugin_updater::{Error, UpdaterExt};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
-const CHANGELOG_URL: &str =
-    "https://github.com/poco-ai/Agentero/releases/latest/download/changelog.json";
-const ATOMGIT_RELEASES_URL: &str = "https://api.atomgit.com/api/v5/repos/poco-ai/Agentero/releases";
 const CHANGELOG_MAX_BYTES: usize = 1024 * 1024;
 const CHANGELOG_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const BUNDLED_CHANGELOG: &[u8] = include_bytes!("../../../../src/lib/update/changelog.json");
@@ -108,55 +106,11 @@ async fn download_changelog(
     client: &reqwest::Client,
     minimum: Option<semver::Version>,
 ) -> Result<(Vec<u8>, Changelog), String> {
-    let github = async {
-        let bytes = download_changelog_body(client, CHANGELOG_URL).await?;
-        let changelog = parse_changelog(&bytes).ok_or("Invalid GitHub changelog")?;
-        if latest_version(&changelog) < minimum {
-            return Err("GitHub changelog is older than the current history".into());
-        }
-        Ok::<_, String>((bytes, changelog))
-    }
-    .await;
-    if github.is_ok() {
-        return github;
-    }
-
-    #[derive(Deserialize)]
-    struct AtomGitAsset {
-        name: String,
-    }
-
-    #[derive(Deserialize)]
-    struct AtomGitRelease {
-        tag_name: String,
-        prerelease: bool,
-        assets: Vec<AtomGitAsset>,
-    }
-
-    let release: AtomGitRelease = serde_json::from_slice(
-        &download_changelog_body(client, &format!("{ATOMGIT_RELEASES_URL}/latest")).await?,
-    )
-    .map_err(|error| error.to_string())?;
-    let version = stable_version(&release.tag_name).ok_or("Invalid AtomGit release tag")?;
-    if release.prerelease
-        || !release
-            .assets
-            .iter()
-            .any(|asset| asset.name == "changelog.json")
-    {
-        return Err("AtomGit has no stable changelog attachment".into());
-    }
-    if minimum.is_some_and(|minimum| minimum > version) {
-        return Err("AtomGit changelog is older than the current history".into());
-    }
-    let url = format!(
-        "{ATOMGIT_RELEASES_URL}/{}/attach_files/changelog.json/download",
-        release.tag_name
-    );
+    let url = format!("https://github.com/{RELEASE_REPO}/releases/latest/download/changelog.json");
     let bytes = download_changelog_body(client, &url).await?;
-    let changelog = parse_changelog(&bytes).ok_or("Invalid AtomGit changelog")?;
-    if latest_version(&changelog).as_ref() != Some(&version) {
-        return Err("AtomGit changelog does not match the release tag".into());
+    let changelog = parse_changelog(&bytes).ok_or("Invalid channel changelog")?;
+    if latest_version(&changelog) < minimum {
+        return Err("Channel changelog is older than the current history".into());
     }
     Ok((bytes, changelog))
 }

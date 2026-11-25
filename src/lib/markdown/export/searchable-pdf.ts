@@ -22,7 +22,7 @@ import {
 	rgb,
 	StandardFonts,
 } from "pdf-lib";
-import agenteroAppIconUrl from "@/assets/agentero-app-icon.svg";
+import { APP_ICON as agenteroAppIconUrl } from "@/lib/core/branding";
 import { dataUrlToUint8Array, loadImage } from "@/lib/markdown/export/capture";
 import type { ExportTextLayer } from "@/lib/markdown/export/text-layer";
 

@@ -23,6 +23,7 @@ pub mod ops;
 pub mod paths;
 pub mod perf;
 pub mod process;
+pub mod release;
 pub mod remote;
 pub mod sqlite;
 pub mod time;

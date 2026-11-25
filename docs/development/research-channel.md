@@ -1,6 +1,14 @@
-# Research channel
+# AgenteroZ 定制自用版
 
 The Fork maintains the paper-note customization on `research/stable` and builds a signed Windows x64 installer when either that source or the latest stable upstream Release changes. Official prereleases and arbitrary upstream `main` commits are excluded.
+
+## Name, icon and project links
+
+`research-channel.json` owns the visible name **AgenteroZ 定制自用版**, short name **AgenteroZ**, and Fork repository. `src/lib/core/branding.ts` supplies the frontend name, icon and links. The About pane lists paper-note document selection and memory, research skills, and the signed update channel. Project and feedback buttons open this Fork; the separately labelled upstream credit opens the original project.
+
+`src/assets/agenteroz-icon.svg` is the source for the book, Z and sound-wave icon. Generate native assets with `pnpm exec tauri icon src/assets/agenteroz-icon.svg --output <temporary-directory>`, then copy `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.ico` and `icon.icns` into `src-tauri/icons/agenteroz/`.
+
+The main caption and new-window captions use the branded title. Research builds supply a small NSIS hook header to set the Windows installed-app display name and rename shortcuts owned by this installation. The executable name, internal `productName` (`Agentero`), uninstall registry key, application identifier (`com.poco-ai.agentero`), CLI commands, user directories and Vault paths keep their existing identity. Branding therefore does not create a second installation or data location. The NSIS wizard's internal product name remains Agentero.
 
 ## Install the channel once, then update normally
 
@@ -10,8 +18,9 @@ Subsequent in-app updates install the signed customized build. Installing an off
 
 Each Release contains:
 
-- The Windows NSIS setup executable and its Tauri updater signature.
+- `AgenteroZ_<version>_x64-setup.exe` and its Tauri updater signature.
 - `latest.json`, containing the signed `windows-x86_64` update.
+- `changelog.json`, with the same bilingual channel entry bundled in the desktop.
 - `channel.json`, identifying the upstream tag/SHA, customized source, candidate base, version and workflow run.
 - A matching `agentero-cli-<version>-x86_64-pc-windows-msvc.zip`, containing `agentero.exe` and `pdfium.dll`, plus its `.sha256`. The desktop's existing Install CLI entry uses this Fork's matching Release.
 - `SHA256SUMS`, covering all distributed assets.
@@ -36,19 +45,23 @@ Generated Release notes present equivalent Chinese and English summaries, in tha
 
 Versions use `1.<github.run_number>.<github.run_attempt>`, with every component restricted to 1–65535 for Windows. A new run increases the minor number; rerunning a failed run increases the patch number. A stale run cannot publish a version older than the current channel. Before the run number reaches 65536, increment the configured major and reset/recreate the workflow's run sequence as a deliberate channel maintenance change.
 
-`research-channel.json` owns the Fork repository, upstream repository, target branch and major version. Build scripts leave the committed upstream package versions intact. Inside the disposable build checkout they stamp only:
+`research-channel.json` owns the display names, Fork repository, upstream repository, target branch and major version. Build scripts leave the committed upstream package versions intact. Inside the disposable build checkout they stamp:
 
 - `package.json` version.
 - The `[package].version` fields of `src-tauri/Cargo.toml`, `cli/Cargo.toml`, `crates/agentero-core/Cargo.toml` and `crates/agentero-mcp/Cargo.toml`, keeping HTTP User-Agent and MCP service versions aligned with the application.
 - All four corresponding local package versions in `Cargo.lock`, preserving dependency resolutions.
 - `CFBundleShortVersionString` and `CFBundleVersion` in `src-tauri/ios-project.yml`.
 - An external Tauri overlay with the channel version, NSIS target, public key and Fork updater endpoint.
+- A generated NSIS hook header with the custom display name.
+- A bilingual channel entry at the beginning of `src/lib/update/changelog.json`, including the upstream version and custom features.
+
+Preparation carries the previously published `changelog.json` entries into the next build state. New entries keep that published history and merge upstream baseline entries by tag in descending version order. A release from before the first channel changelog asset contributes no synthetic history entry.
 
 `configure` also writes that same overlay as compact `TAURI_CONFIG` JSON to `GITHUB_ENV`. Direct Cargo tests/builds consume it before the Tauri action runs; both `tauri-build` and Tauri code generation merge this environment configuration, including the application version and updater key. The Tauri action receives the same overlay through `--config`.
 
 Both Cargo builds continue to use `--locked`. The workflow records the unmodified candidate commit as the source identity; generated versions and overlays are never pushed into that candidate.
 
-`AGENTERO_RELEASE_REPO` and `VITE_AGENTERO_RELEASE_REPO` are set only in the Fork build so matching CLI downloads and release-details links use this Fork. Without these build variables, generic upstream behavior remains unchanged.
+`AGENTERO_RELEASE_REPO` and `VITE_AGENTERO_RELEASE_REPO` select matching CLI downloads, changelog and release-details URLs. They are set by the existing Fork workflow. Local defaults also select this Fork, and the committed Tauri configuration uses the same Fork updater endpoint and public key. The old official changelog and AtomGit fallback are removed so a channel build cannot replace its history with official-version metadata.
 
 ## Signing configuration
 

@@ -1,5 +1,5 @@
 {
-	"title": "Welcome to Agentero",
+	"title": "Welcome to {{appName}}",
 	"subtitle": "Read papers and take notes alongside your AI assistant. A few quick steps to set up your workspace.",
 	"recommended": "Recommended",
 	"steps": {

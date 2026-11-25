@@ -16,9 +16,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import agenteroAppIcon from "@/assets/agentero-app-icon.svg";
 import { CompactCodeBlock } from "@/components/agent/rendering/code-block";
-import { AboutFeedback } from "@/components/settings/panes/about-feedback";
 import {
 	PageTitle,
 	SettingsGroup,
@@ -42,6 +40,13 @@ import {
 	installCliCommand,
 	uninstallCliCommand,
 } from "@/lib/cli/api";
+import {
+	APP_ICON,
+	APP_ISSUES_URL,
+	APP_NAME,
+	APP_REPOSITORY_URL,
+	APP_UPSTREAM_URL,
+} from "@/lib/core/branding";
 import { errorText } from "@/lib/core/error";
 import { clearLogs } from "@/lib/core/logger";
 import { notifyError, notifySuccess } from "@/lib/core/notify";
@@ -65,8 +70,6 @@ import {
 const CLI_BREW_INSTALL_COMMAND =
 	"brew tap poco-ai/agentero\nbrew install agentero";
 
-const GITHUB_REPO_URL = "https://github.com/poco-ai/Agentero";
-
 export function AboutPane() {
 	const { t } = useTranslation("settings");
 	const [version, setVersion] = useState<string>();
@@ -87,7 +90,6 @@ export function AboutPane() {
 	const [reflowBusy, setReflowBusy] = useState(false);
 	const isMac = useMemo(() => isMacOS(), []);
 	const isWin = useMemo(() => isWindows(), []);
-	const showFeedback = isTauri() && !isMobileApp();
 
 	const refreshCli = useCallback(async () => {
 		if (!isTauri()) return;
@@ -306,7 +308,7 @@ export function AboutPane() {
 						<Button
 							variant="outline"
 							size="sm"
-							onClick={() => openExternalUrl(GITHUB_REPO_URL)}
+							onClick={() => openExternalUrl(APP_REPOSITORY_URL)}
 						>
 							<Star data-icon="inline-start" className="star-twinkle" />
 							{t("about.starGithub")}
@@ -318,14 +320,14 @@ export function AboutPane() {
 				<div className="flex flex-wrap items-center justify-between gap-4 px-3.5 py-4">
 					<div className="flex min-w-0 items-center gap-3">
 						<img
-							src={agenteroAppIcon}
+							src={APP_ICON}
 							alt=""
 							aria-hidden
 							className="size-10 shrink-0 rounded-lg"
 						/>
 						<div className="min-w-0 space-y-0.5">
 							<p className="font-semibold text-base text-foreground">
-								Agentero
+								{APP_NAME}
 							</p>
 							{version && (
 								<p className="flex flex-wrap items-center gap-1.5 text-muted-foreground text-xs">
@@ -382,7 +384,34 @@ export function AboutPane() {
 					</div>
 				</div>
 			</SettingsGroup>
-			{showFeedback ? <AboutFeedback /> : null}
+			<SettingsGroup>
+				<div className="space-y-3 px-3.5 py-4 text-sm">
+					<p className="font-medium">{t("about.custom.title")}</p>
+					<ul className="list-disc space-y-1.5 pl-5 text-muted-foreground">
+						<li>{t("about.custom.notes")}</li>
+						<li>{t("about.custom.skills")}</li>
+						<li>{t("about.custom.updates")}</li>
+					</ul>
+					<div className="flex flex-wrap gap-x-4 gap-y-1">
+						<Button
+							variant="link"
+							size="sm"
+							className="h-auto p-0"
+							onClick={() => openExternalUrl(APP_ISSUES_URL)}
+						>
+							{t("about.custom.feedback")}
+						</Button>
+						<Button
+							variant="link"
+							size="sm"
+							className="h-auto p-0 text-muted-foreground"
+							onClick={() => openExternalUrl(APP_UPSTREAM_URL)}
+						>
+							{t("about.custom.upstream")}
+						</Button>
+					</div>
+				</div>
+			</SettingsGroup>
 			{isTauri() ? (
 				<SettingsGroup>
 					<SettingsRow

@@ -3,6 +3,7 @@
  * Mirrors the translate BYOK provider-config pattern: the Host keeps the
  * real API key; the WebView only ever sees a `*` mask.
  */
+import { APP_REPOSITORY_URL } from "@/lib/core/branding";
 
 /**
  * Layout provider ids with remote credentials (shared with the body parser).
@@ -107,7 +108,7 @@ export const DEFAULT_LAYOUT_SETTINGS: LayoutSettings = {
 /** Docs / console pages for obtaining keys (settings UI external link). */
 export const LAYOUT_PROVIDER_DOCS_URLS: Record<LayoutProviderId, string> = {
 	// Built-in provider has no key page; the card is never rendered.
-	agentero: "https://github.com/poco-ai/Agentero",
+	agentero: APP_REPOSITORY_URL,
 	paddle: "https://aistudio.baidu.com/account/accessToken",
 	mineru: "https://mineru.net/apiManage/token",
 	openaiCompatible: "https://cloud.siliconflow.cn/i/b9LPNHTG",
